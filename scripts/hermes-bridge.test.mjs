@@ -111,6 +111,35 @@ test("root shows the bridge index without exposing the Hermes key", async () => 
 	});
 });
 
+test("browser root requests get a readable HTML index", async () => {
+	await withServers(async ({ bridgeBaseUrl }) => {
+		const response = await fetch(`${bridgeBaseUrl}/`, {
+			headers: { accept: "text/html" },
+		});
+		assert.equal(response.status, 200);
+		assert.match(response.headers.get("content-type") ?? "", /text\/html/);
+		const body = await response.text();
+		assert.match(body, /Pi Hermes Bridge/);
+		assert.match(body, /\/health/);
+		assert.doesNotMatch(body, /hermes-secret/);
+	});
+});
+
+test("browser auxiliary paths do not look like bridge failures", async () => {
+	await withServers(async ({ bridgeBaseUrl }) => {
+		const favicon = await fetch(`${bridgeBaseUrl}/favicon.ico`, {
+			headers: { accept: "image/avif,image/webp,*/*" },
+		});
+		assert.equal(favicon.status, 204);
+
+		const browserPath = await fetch(`${bridgeBaseUrl}/chrome-probe`, {
+			headers: { accept: "text/html" },
+		});
+		assert.equal(browserPath.status, 200);
+		assert.match(await browserPath.text(), /Pi Hermes Bridge/);
+	});
+});
+
 test("detailed health mirrors Hermes detailed health for Pi status compatibility", async () => {
 	await withServers(async ({ bridgeBaseUrl }) => {
 		const response = await fetch(`${bridgeBaseUrl}/health/detailed`);
@@ -123,6 +152,11 @@ test("protected gateway reads require the bridge token and use the Hermes key se
 	await withServers(async ({ bridgeBaseUrl, hermesRequests }) => {
 		const rejected = await fetch(`${bridgeBaseUrl}/v1/models`);
 		assert.equal(rejected.status, 401);
+
+		const browserRejected = await fetch(`${bridgeBaseUrl}/v1/models`, {
+			headers: { accept: "text/html" },
+		});
+		assert.equal(browserRejected.status, 401);
 
 		const accepted = await fetch(`${bridgeBaseUrl}/v1/models`, {
 			headers: { authorization: "Bearer bridge-secret" },

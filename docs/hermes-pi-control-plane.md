@@ -43,7 +43,7 @@ Bridge defaults:
 
 Bridge endpoints:
 
-- `GET /`: public bridge index for browser and uptime checks.
+- `GET /`: public bridge index for browser and uptime checks; browsers receive HTML and API clients receive JSON.
 - `GET /health`: public bridge plus Hermes health summary.
 - `GET /health/detailed`: public pass-through for Pi status compatibility.
 - `GET /v1/status`: authenticated bridge/Hermes status summary.

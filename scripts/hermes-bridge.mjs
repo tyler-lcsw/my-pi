@@ -138,6 +138,25 @@ function sendJson(response, status, payload, extraHeaders = {}) {
 	response.end(`${JSON.stringify(payload)}\n`);
 }
 
+function sendHtml(response, status, html, extraHeaders = {}) {
+	response.writeHead(status, {
+		"content-type": "text/html; charset=utf-8",
+		"cache-control": "no-store",
+		...extraHeaders,
+	});
+	response.end(html);
+}
+
+function sendNoContent(response) {
+	response.writeHead(204, { "cache-control": "no-store" });
+	response.end();
+}
+
+function acceptsHtml(request) {
+	const accept = request.headers.accept;
+	return typeof accept === "string" && accept.includes("text/html");
+}
+
 function limitedText(value) {
 	if (!value) return "";
 	return value.length > 500 ? `${value.slice(0, 500)}...` : value;
@@ -291,6 +310,40 @@ function bridgeIndex(config) {
 	};
 }
 
+function bridgeIndexHtml(config) {
+	const index = bridgeIndex(config);
+	return `<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Pi Hermes Bridge</title>
+	<style>
+		body { color: #172026; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; line-height: 1.5; margin: 0; padding: 32px; }
+		main { max-width: 760px; }
+		h1 { font-size: 28px; line-height: 1.2; margin: 0 0 12px; }
+		code { background: #edf1f5; border-radius: 4px; padding: 2px 5px; }
+		ul { padding-left: 22px; }
+	</style>
+</head>
+<body>
+	<main>
+		<h1>Pi Hermes Bridge</h1>
+		<p>Status: <strong>${index.status}</strong></p>
+		<p>Hermes target: <code>${index.hermesBaseUrl}</code></p>
+		<p>Mutations enabled: <strong>${index.mutationsEnabled ? "yes" : "no"}</strong></p>
+		<p>Protected routes: <code>${index.auth.protectedRoutes.join(", ")}</code></p>
+		<ul>
+			<li><a href="${index.endpoints.health}">Health</a></li>
+			<li><a href="${index.endpoints.detailedHealth}">Detailed health</a></li>
+			<li><code>${index.endpoints.models}</code> requires the bridge bearer token</li>
+		</ul>
+	</main>
+</body>
+</html>
+`;
+}
+
 function runIdFromPath(pathname, suffix = "") {
 	const pattern = suffix
 		? new RegExp(`^/v1/runs/([^/]+)/${suffix}$`)
@@ -303,8 +356,16 @@ async function handleBridgeRequest(request, response, config) {
 	const url = new URL(request.url ?? "/", "http://127.0.0.1");
 	const pathname = url.pathname;
 
-	if (request.method === "GET" && pathname === "/") {
-		sendJson(response, 200, bridgeIndex(config));
+	if (request.method === "GET" && (pathname === "/" || pathname === "/index.html")) {
+		if (acceptsHtml(request)) {
+			sendHtml(response, 200, bridgeIndexHtml(config));
+		} else {
+			sendJson(response, 200, bridgeIndex(config));
+		}
+		return;
+	}
+	if (request.method === "GET" && pathname === "/favicon.ico") {
+		sendNoContent(response);
 		return;
 	}
 	if (request.method === "GET" && pathname === "/health") {
@@ -313,6 +374,10 @@ async function handleBridgeRequest(request, response, config) {
 	}
 	if (request.method === "GET" && pathname === "/health/detailed") {
 		sendJson(response, 200, await fetchHermesJson(config, "/health/detailed", { auth: false }));
+		return;
+	}
+	if (request.method === "GET" && acceptsHtml(request) && !pathname.startsWith("/v1/")) {
+		sendHtml(response, 200, bridgeIndexHtml(config));
 		return;
 	}
 
