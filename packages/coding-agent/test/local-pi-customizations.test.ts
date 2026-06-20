@@ -1,0 +1,259 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.ts";
+import { ExtensionRunner } from "../src/core/extensions/runner.ts";
+import type { ExtensionActions, ExtensionContextActions, ExtensionUIContext } from "../src/core/extensions/types.ts";
+import { ModelRegistry } from "../src/core/model-registry.ts";
+import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
+import type { Theme } from "../src/modes/interactive/theme/theme.ts";
+
+const TEST_DIR = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(TEST_DIR, "../../..");
+const TEST_THEME = {
+	fg: (_color: string, text: string) => text,
+	bg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+	italic: (text: string) => text,
+	underline: (text: string) => text,
+	inverse: (text: string) => text,
+	strikethrough: (text: string) => text,
+	getFgAnsi: () => "",
+	getBgAnsi: () => "",
+} as unknown as Theme;
+
+interface HermesFixture {
+	baseUrl: string;
+	close(): Promise<void>;
+}
+
+const extensionActions: ExtensionActions = {
+	sendMessage: () => {},
+	sendUserMessage: () => {},
+	appendEntry: () => {},
+	setSessionName: () => {},
+	getSessionName: () => undefined,
+	setLabel: () => {},
+	getActiveTools: () => [],
+	getAllTools: () => [],
+	setActiveTools: () => {},
+	refreshTools: () => {},
+	getCommands: () => [],
+	setModel: async () => false,
+	getThinkingLevel: () => "off",
+	setThinkingLevel: () => {},
+};
+
+const extensionContextActions: ExtensionContextActions = {
+	getModel: () => undefined,
+	isIdle: () => true,
+	isProjectTrusted: () => true,
+	getSignal: () => undefined,
+	abort: () => {},
+	hasPendingMessages: () => false,
+	shutdown: () => {},
+	getContextUsage: () => undefined,
+	compact: () => {},
+	getSystemPrompt: () => "",
+};
+
+function writeJson(response: ServerResponse, payload: unknown): void {
+	response.writeHead(200, { "content-type": "application/json" });
+	response.end(`${JSON.stringify(payload)}\n`);
+}
+
+function handleHermesFixtureRequest(request: IncomingMessage, response: ServerResponse): void {
+	switch (request.url) {
+		case "/health":
+			writeJson(response, { status: "ok" });
+			return;
+		case "/v1/capabilities":
+			writeJson(response, { runs: true, jobs: true, skills: true });
+			return;
+		case "/v1/models":
+			writeJson(response, { data: [{ id: "local-fixture-model" }] });
+			return;
+		case "/v1/skills":
+			writeJson(response, { data: [{ name: "local-fixture-skill" }] });
+			return;
+		case "/v1/toolsets":
+			writeJson(response, { data: [{ name: "local-fixture-toolset" }] });
+			return;
+		default:
+			response.writeHead(404, { "content-type": "application/json" });
+			response.end('{"error":"not found"}\n');
+	}
+}
+
+async function startHermesFixture(): Promise<HermesFixture> {
+	const server = createServer(handleHermesFixtureRequest);
+	await new Promise<void>((resolveListen) => {
+		server.listen(0, "127.0.0.1", resolveListen);
+	});
+	const address = server.address();
+	if (typeof address !== "object" || address === null) {
+		throw new Error("Hermes fixture did not bind to a TCP port");
+	}
+	return {
+		baseUrl: `http://127.0.0.1:${address.port}`,
+		close: () =>
+			new Promise<void>((resolveClose, rejectClose) => {
+				server.close((error) => {
+					if (error) {
+						rejectClose(error);
+						return;
+					}
+					resolveClose();
+				});
+			}),
+	};
+}
+
+function createStatusCapturingUi(statuses: Map<string, string>): ExtensionUIContext {
+	return {
+		select: async () => undefined,
+		confirm: async () => false,
+		input: async () => undefined,
+		notify: () => {},
+		onTerminalInput: () => () => {},
+		setStatus: (key, text) => {
+			if (text === undefined) {
+				statuses.delete(key);
+				return;
+			}
+			statuses.set(key, text);
+		},
+		setWorkingMessage: () => {},
+		setWorkingVisible: () => {},
+		setWorkingIndicator: () => {},
+		setHiddenThinkingLabel: () => {},
+		setWidget: () => {},
+		setFooter: () => {},
+		setHeader: () => {},
+		setTitle: () => {},
+		custom: async () => undefined as never,
+		pasteToEditor: () => {},
+		setEditorText: () => {},
+		getEditorText: () => "",
+		editor: async () => undefined,
+		addAutocompleteProvider: () => {},
+		setEditorComponent: () => {},
+		getEditorComponent: () => undefined,
+		get theme(): Theme {
+			return TEST_THEME;
+		},
+		getAllThemes: () => [],
+		getTheme: () => undefined,
+		setTheme: () => ({ success: false, error: "not available in test" }),
+		getToolsExpanded: () => false,
+		setToolsExpanded: () => {},
+	};
+}
+
+describe("local Pi customizations", () => {
+	let tempDir: string;
+	let previousAgentDir: string | undefined;
+	let previousHermesBaseUrl: string | undefined;
+	let hermesFixture: HermesFixture;
+
+	beforeEach(async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-local-customizations-"));
+		previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+		previousHermesBaseUrl = process.env.HERMES_API_BASE_URL;
+		process.env.PI_CODING_AGENT_DIR = join(tempDir, "agent");
+		hermesFixture = await startHermesFixture();
+		process.env.HERMES_API_BASE_URL = hermesFixture.baseUrl;
+	});
+
+	afterEach(async () => {
+		if (previousAgentDir === undefined) {
+			delete process.env.PI_CODING_AGENT_DIR;
+		} else {
+			process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+		}
+		if (previousHermesBaseUrl === undefined) {
+			delete process.env.HERMES_API_BASE_URL;
+		} else {
+			process.env.HERMES_API_BASE_URL = previousHermesBaseUrl;
+		}
+		await hermesFixture.close();
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("discovers and starts project-local extensions, prompts, skills, and status customizations", async () => {
+		const loader = new DefaultResourceLoader({
+			cwd: REPO_ROOT,
+			agentDir: join(tempDir, "agent"),
+		});
+
+		await loader.reload({ resolveProjectTrust: async () => true });
+
+		const extensionsResult = loader.getExtensions();
+		expect(extensionsResult.errors).toEqual([]);
+		expect(extensionsResult.extensions.map((extension) => extension.path).sort()).toEqual([
+			join(REPO_ROOT, ".pi", "extensions", "hermes-board.ts"),
+			join(REPO_ROOT, ".pi", "extensions", "hermes-status.ts"),
+			join(REPO_ROOT, ".pi", "extensions", "prompt-url-widget.ts"),
+			join(REPO_ROOT, ".pi", "extensions", "redraws.ts"),
+			join(REPO_ROOT, ".pi", "extensions", "tps.ts"),
+		]);
+
+		expect(loader.getPrompts().diagnostics).toEqual([]);
+		expect(
+			loader
+				.getPrompts()
+				.prompts.map((prompt) => prompt.name)
+				.sort(),
+		).toEqual(["cl", "is", "pr", "sa", "wr"]);
+
+		expect(loader.getSkills().diagnostics).toEqual([]);
+		expect(loader.getSkills().skills.map((skill) => skill.name)).toContain("add-llm-provider");
+		expect(loader.getAgentsFiles().agentsFiles.map((file) => file.path)).toContain(join(REPO_ROOT, "AGENTS.md"));
+
+		const sessionManager = SessionManager.inMemory();
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = ModelRegistry.create(authStorage);
+		const runner = new ExtensionRunner(
+			extensionsResult.extensions,
+			extensionsResult.runtime,
+			REPO_ROOT,
+			sessionManager,
+			modelRegistry,
+		);
+		const extensionErrors: unknown[] = [];
+		const statuses = new Map<string, string>();
+		runner.onError((error) => extensionErrors.push(error));
+		runner.bindCore(extensionActions, extensionContextActions);
+		runner.setUIContext(createStatusCapturingUi(statuses), "tui");
+
+		await runner.emit({ type: "session_start", reason: "startup" });
+
+		expect(extensionErrors).toEqual([]);
+		expect(
+			runner
+				.getRegisteredCommands()
+				.map((command) => command.name)
+				.sort(),
+		).toEqual([
+			"hermes-board",
+			"hermes-card-create",
+			"hermes-card-move",
+			"hermes-card-review",
+			"hermes-card-show",
+			"hermes-status",
+			"tui",
+		]);
+		expect(
+			runner
+				.getAllRegisteredTools()
+				.map((tool) => tool.definition.name)
+				.sort(),
+		).toEqual(["hermes_board", "hermes_status"]);
+		expect(statuses.get("hermes")).toContain("Hermes 1 model, 1 skill");
+		expect(statuses.get("hermes-board")).toContain("Board 0 cards");
+	});
+});

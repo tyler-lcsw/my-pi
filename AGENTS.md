@@ -1,5 +1,19 @@
 # Development Rules
 
+## Project Mission and Pipeline
+
+- This checkout is the local development workspace for Tyler's custom Pi environment.
+- The strategic goal is to make Pi a highly capable frontend and control surface for Hermes Agent on bee01.
+- Research package integrations from the live `https://pi.dev/packages` surface, npm packages labeled as Pi extensions, and reusable universal skill resources before recommending or implementing them.
+- CI/CD flow: develop locally on this machine, sync to the remote fork `github.com/tyler-lcsw/my-pi.git` only when asked, then deploy or sync to the Tailscale-authenticated bee01 server when asked.
+- bee01 has an equivalent project at `~/projects/my-pi`; treat live bee01 state as the deployment truth when doing remote work.
+- Do not assume local, GitHub fork, and bee01 states are in sync. Verify the target surface before changing or reporting on it.
+- For bee01 access, consult `/Users/tyler-lcsw/projects/nix` when uncertain and use only the supported Tailscale SSH path: the `bee01` alias.
+- Establish bee01 shell access with the bee01 connection helper first, then reuse the persistent multiplexed connection with `ControlMaster=auto`, `ControlPath=$HOME/.ssh/cm-%r@%h:%p`, and `ControlPersist=4h`.
+- If bee01 access requires Tailscale approval, show the approval URL clearly, stop remote inspection, and wait for the user action before retrying.
+- For bee01 localhost web previews, prefer Tailscale Serve on bee01. Do not use SSH port forwarding unless explicitly requested as a diagnostic exception.
+- Do not push to GitHub, sync remote state, or mutate bee01 unless explicitly asked.
+
 ## Conversational Style
 
 - Keep answers short and concise
