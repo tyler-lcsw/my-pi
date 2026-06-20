@@ -227,8 +227,8 @@ export default function promptUrlWidgetExtension(pi: ExtensionAPI) {
 		updatePromptContext(ctx, match);
 	});
 
-	pi.on("session_switch", async (_event, ctx) => {
-		rebuildFromSession(ctx);
+	pi.on("session_before_switch", async (_event, ctx) => {
+		if (ctx.hasUI) ctx.ui.setWidget("prompt-url", undefined);
 	});
 
 	const getUserText = (content: string | { type: string; text?: string }[] | undefined): string => {

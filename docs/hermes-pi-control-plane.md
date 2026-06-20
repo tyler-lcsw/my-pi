@@ -8,7 +8,7 @@ The first local slice is `.pi/extensions/hermes-status.ts`.
 
 It provides:
 
-- `/hermes-status`: read-only Hermes health, capability, model, skill, and toolset report.
+- `/hermes-status`: read-only Hermes health, detailed health, capability, and model report.
 - `hermes_status`: read-only tool for the agent to inspect the configured Hermes API surface.
 - Footer status: shows whether the configured Hermes API is reachable.
 
@@ -20,6 +20,82 @@ Configuration:
 
 The extension does not start Hermes, write memory, mutate skills, start runs, or contact bee01.
 
+## bee01 Bridge
+
+The recommended control path is a bee01-hosted bridge process:
+
+```text
+Local Pi
+  -> Tailscale Serve HTTPS URL
+    -> bee01 loopback bridge
+      -> Hermes Gateway API on 127.0.0.1:8642
+```
+
+The bridge keeps `API_SERVER_KEY` on bee01. Pi uses a separate bridge bearer token when the bridge is exposed beyond bee01 loopback. Prefer `PI_HERMES_BRIDGE_TOKEN_FILE` for runtime launches so the token is not embedded in process arguments or shell history.
+
+Bridge defaults:
+
+- Script: `scripts/hermes-bridge.mjs`
+- Bind: `127.0.0.1:8787`
+- Hermes target: `http://127.0.0.1:8642`
+- Mutations: disabled unless `PI_HERMES_BRIDGE_ENABLE_MUTATIONS=1`
+- Auth: `PI_HERMES_BRIDGE_TOKEN_FILE` preferred; `PI_HERMES_BRIDGE_TOKEN` also supported
+
+Bridge endpoints:
+
+- `GET /`: public bridge index for browser and uptime checks.
+- `GET /health`: public bridge plus Hermes health summary.
+- `GET /health/detailed`: public pass-through for Pi status compatibility.
+- `GET /v1/status`: authenticated bridge/Hermes status summary.
+- `GET /v1/models`: authenticated gateway model catalog.
+- `GET /v1/capabilities`: authenticated gateway capability contract.
+- `GET /v1/runs/{run_id}`: authenticated run status.
+- `GET /v1/runs/{run_id}/events`: authenticated run event stream.
+- `POST /v1/runs`, `/v1/runs/{run_id}/approval`, `/v1/runs/{run_id}/stop`: disabled by default and reserved for explicit approval-gated workflows.
+
+Local Pi can point `HERMES_API_BASE_URL` at the bridge URL and set `HERMES_API_KEY` to the bridge token. This avoids copying the Hermes Gateway `API_SERVER_KEY` to the Mac.
+
+Current local-development access:
+
+- Active exposure is Tailscale Serve HTTPS at `https://bee01.beagle-perch.ts.net/`, proxying to `127.0.0.1:8787`.
+- The bridge itself listens only on bee01 loopback; Tailscale Serve owns the tailnet HTTPS surface.
+- `/v1/*` requires the bridge bearer token and mutations remain disabled unless explicitly enabled.
+- bee01 does not use UFW for this path. The hostname is a Tailscale MagicDNS/Funnel-style tailnet endpoint served by `tailscaled`, and direct bridge access stays on loopback.
+
+## bee01 Endpoint Contract
+
+bee01 runs Hermes as a manual-start Docker stack:
+
+- Hermes Gateway API: `127.0.0.1:8642`
+- Hermes dashboard: `127.0.0.1:9119`
+- Local model router inside Docker: `http://hermes-model-router:18082/v1`
+- Gateway auth: bearer token from `API_SERVER_KEY`, stored outside this repo in `/var/lib/ai/hermes-agent/gateway.env`
+
+The Pi extension should target the gateway API, not the dashboard. For a Pi process running on bee01, the default `http://127.0.0.1:8642` is correct. For a local Mac process controlling bee01, expose a deliberate preview/control URL through Tailscale Serve or another approved local proxy surface before setting `HERMES_API_BASE_URL`.
+
+Current gateway discovery surfaces:
+
+- `GET /health`
+- `GET /health/detailed`
+- `GET /v1/models`
+- `GET /v1/capabilities`
+
+`/health` and `/health/detailed` are public health checks. `/v1/models` and `/v1/capabilities` require bearer auth. On the current bee01 image, `/v1/models` returns the gateway-level model `hermes-agent`; the local model router's internal catalog is separate and includes `hermes-local-auto`, Qwen Hermes aliases, the vision model, Toutetsu, and local TTS.
+
+Current gateway control surfaces:
+
+- `POST /v1/chat/completions`
+- `POST /v1/responses`
+- `POST /v1/runs`
+- `GET /v1/runs/{run_id}`
+- `GET /v1/runs/{run_id}/events`
+- `POST /v1/runs/{run_id}/approval`
+- `POST /v1/runs/{run_id}/stop`
+
+The dashboard server on `127.0.0.1:9119` owns separate authenticated UI APIs such as `/api/sessions`. Pi should not treat dashboard APIs as the stable control-plane contract unless that becomes an explicit integration track.
+
+Mutating run endpoints exist, but Pi should keep them behind explicit approval-gated commands.
+
 ## Architecture Direction
 
 Use one shared Hermes contract with multiple focused Pi extensions.
@@ -30,7 +106,7 @@ Pi TUI / CLI
     -> shared Hermes API client
       -> Hermes API server
       -> Hermes OpenAI-compatible model endpoints
-      -> Hermes runs, jobs, sessions, skills, memory, and toolsets
+      -> Hermes runs, approvals, session headers, skills, memory, and toolsets
       -> MCP only where model-visible tool/resource bridging is useful
 ```
 
@@ -39,7 +115,7 @@ Recommended modules:
 - `pi-hermes-core`: shared client, auth, health, capabilities, error handling.
 - `pi-hermes-provider`: dynamic `pi.registerProvider()` bridge from `/v1/models`.
 - `pi-hermes-goals`: start, inspect, stop, resume, and approve long-running Hermes runs.
-- `pi-hermes-memory-skills`: browse/search memory and skills first, later gated writes.
+- `pi-hermes-memory-skills`: browse/search memory and skills through Hermes-supported surfaces first, later gated writes.
 - `pi-hermes-tools`: optional MCP bridge for model-visible tools.
 - `pi-hermes-status`: footer/status widgets, active runs, jobs, pending approvals.
 - `pi-hermes-docs`: Tyler-specific commands and prompts explaining available Hermes abilities.
@@ -66,7 +142,7 @@ For LMHG work, Hermes should help create and review safeguards, runbooks, migrat
 
 1. Hermes status and capability browser
    - Confirm what a local or remote Hermes instance can do before asking it to act.
-   - Show models, skills, toolsets, runs, jobs, sessions, and pending approvals.
+   - Show health, capabilities, gateway models, run support, session-header behavior, and pending approvals.
 
 2. Local model provider bridge
    - Let Pi use Hermes-routed local models as selectable Pi models.
@@ -159,6 +235,7 @@ Sources:
 - https://pi.dev/packages/pi-mcp-extension
 - https://pi.dev/packages/pi-hermes-memory
 - https://hermes-agent.nousresearch.com/docs/user-guide/features/api-server
+- https://github.com/NousResearch/hermes-agent/blob/main/gateway/platforms/api_server.py
 - https://hermes-agent.nousresearch.com/docs/user-guide/features/memory
 - https://hermes-agent.nousresearch.com/docs/user-guide/features/skills
 - https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp

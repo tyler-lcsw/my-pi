@@ -31,8 +31,14 @@ interface HermesFixture {
 	close(): Promise<void>;
 }
 
+type SentMessage = Parameters<ExtensionActions["sendMessage"]>[0];
+
+let sentMessages: SentMessage[];
+
 const extensionActions: ExtensionActions = {
-	sendMessage: () => {},
+	sendMessage: (message) => {
+		sentMessages.push(message);
+	},
 	sendUserMessage: () => {},
 	appendEntry: () => {},
 	setSessionName: () => {},
@@ -71,17 +77,14 @@ function handleHermesFixtureRequest(request: IncomingMessage, response: ServerRe
 		case "/health":
 			writeJson(response, { status: "ok" });
 			return;
+		case "/health/detailed":
+			writeJson(response, { status: "ok", api_server: true });
+			return;
 		case "/v1/capabilities":
-			writeJson(response, { runs: true, jobs: true, skills: true });
+			writeJson(response, { runs: true, sessions: true, responses: true });
 			return;
 		case "/v1/models":
 			writeJson(response, { data: [{ id: "local-fixture-model" }] });
-			return;
-		case "/v1/skills":
-			writeJson(response, { data: [{ name: "local-fixture-skill" }] });
-			return;
-		case "/v1/toolsets":
-			writeJson(response, { data: [{ name: "local-fixture-toolset" }] });
 			return;
 		default:
 			response.writeHead(404, { "content-type": "application/json" });
@@ -162,6 +165,7 @@ describe("local Pi customizations", () => {
 
 	beforeEach(async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "pi-local-customizations-"));
+		sentMessages = [];
 		previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 		previousHermesBaseUrl = process.env.HERMES_API_BASE_URL;
 		process.env.PI_CODING_AGENT_DIR = join(tempDir, "agent");
@@ -253,7 +257,51 @@ describe("local Pi customizations", () => {
 				.map((tool) => tool.definition.name)
 				.sort(),
 		).toEqual(["hermes_board", "hermes_status"]);
-		expect(statuses.get("hermes")).toContain("Hermes 1 model, 1 skill");
+		expect(statuses.get("hermes")).toContain("Hermes 1 model");
 		expect(statuses.get("hermes-board")).toContain("Board 0 cards");
+
+		const tools = new Map(runner.getAllRegisteredTools().map((tool) => [tool.definition.name, tool.definition]));
+		const context = runner.createContext();
+		const hermesStatus = tools.get("hermes_status");
+		expect(hermesStatus).toBeDefined();
+		const statusResult = await hermesStatus?.execute("status-call", {}, undefined, undefined, context);
+		const statusText = statusResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		expect(statusText).toContain("Detailed health: status=ok, api_server=true");
+		expect(statusText).toContain("Models: local-fixture-model");
+
+		const hermesBoard = tools.get("hermes_board");
+		expect(hermesBoard).toBeDefined();
+		const createResult = await hermesBoard?.execute(
+			"board-create-call",
+			{ action: "create", title: "Tool-created development task", status: "ready" },
+			undefined,
+			undefined,
+			context,
+		);
+		const createText = createResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		expect(createText).toContain("Tool-created development task");
+
+		const listResult = await hermesBoard?.execute(
+			"board-list-call",
+			{ action: "list" },
+			undefined,
+			undefined,
+			context,
+		);
+		const listText = listResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		expect(listText).toContain("READY (1)");
+		expect(listText).toContain("Tool-created development task");
+
+		const createCommand = runner.getCommand("hermes-card-create");
+		expect(createCommand).toBeDefined();
+		await createCommand?.handler("Command-created development task", runner.createCommandContext());
+		expect(
+			sentMessages.some(
+				(message) =>
+					message.customType === "hermes-board" &&
+					typeof message.content === "string" &&
+					message.content.includes("Command-created development task"),
+			),
+		).toBe(true);
 	});
 });

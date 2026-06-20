@@ -43,7 +43,7 @@ The `hermes_board` tool exposes the same local board model to the agent. It can 
 
 ## Next Implementation Slice
 
-1. Add read-only Hermes run/job discovery and allow cards to show linked run status.
+1. Add read-only Hermes run discovery and allow cards to show linked run status from `GET /v1/runs/{run_id}` and `GET /v1/runs/{run_id}/events`; add jobs only if the live capabilities surface exposes them.
 2. Add an approval-gated `start run from card` command for `ready` cards.
 3. Add an overnight profile with duration, checkpoint interval, allowed paths, allowed commands, and stop conditions.
 4. Extract the board/Hermes contract for reuse by a Codex plugin and later custom control center.

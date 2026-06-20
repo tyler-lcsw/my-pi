@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
@@ -21,6 +22,8 @@ const PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 const SAFETY_LEVELS = ["local-only", "remote-read", "remote-mutation", "phi-sensitive"] as const;
 const BOARD_STORAGE_KEY = "hermes-board";
 const BOARD_VERSION = 1;
+const BOARD_LOCK_STALE_MS = 120_000;
+const BOARD_LOCK_RETRY_MS = 50;
 
 type BoardStatus = (typeof BOARD_STATUSES)[number];
 type CardType = (typeof CARD_TYPES)[number];
@@ -94,6 +97,17 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function isErrno(error: unknown, code: string): boolean {
 	return error instanceof Error && "code" in error && (error as { code?: unknown }).code === code;
+}
+
+function abortError(signal: AbortSignal | undefined): Error | undefined {
+	if (!signal?.aborted) return undefined;
+	const reason = signal.reason;
+	return reason instanceof Error ? reason : new Error("Hermes board operation was aborted");
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	const error = abortError(signal);
+	if (error) throw error;
 }
 
 function isEnumValue<const TValues extends readonly string[]>(
@@ -210,7 +224,14 @@ async function loadBoard(ctx: ExtensionContext): Promise<BoardState> {
 async function writeBoard(ctx: ExtensionContext, board: BoardState): Promise<void> {
 	const storagePath = boardPath(ctx);
 	await mkdir(dirname(storagePath), { recursive: true, mode: 0o700 });
-	await writeFile(storagePath, `${JSON.stringify(board, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+	const tempPath = join(dirname(storagePath), `.${basename(storagePath)}.${process.pid}.${Date.now()}.tmp`);
+	try {
+		await writeFile(tempPath, `${JSON.stringify(board, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+		await rename(tempPath, storagePath);
+	} catch (error) {
+		await rm(tempPath, { force: true });
+		throw error;
+	}
 }
 
 function nowIso(): string {
@@ -226,6 +247,11 @@ function nextCardId(board: BoardState): string {
 function normalizedText(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+function optionalTextList(value: string | undefined): string[] {
+	const normalized = normalizedText(value);
+	return normalized ? [normalized] : [];
 }
 
 function defaultProject(ctx: ExtensionContext): string {
@@ -250,10 +276,10 @@ function createCard(board: BoardState, ctx: ExtensionContext, params: BoardToolP
 		verificationCommand: normalizedText(params.verificationCommand) ?? "npm run check",
 		hermesRunId: normalizedText(params.hermesRunId),
 		hermesJobId: normalizedText(params.hermesJobId),
-		artifacts: normalizedText(params.artifact) ? [normalizedText(params.artifact)] : [],
-		approvals: normalizedText(params.approval) ? [normalizedText(params.approval)] : [],
-		blockers: normalizedText(params.blocker) ? [normalizedText(params.blocker)] : [],
-		notes: normalizedText(params.note) ? [normalizedText(params.note)] : [],
+		artifacts: optionalTextList(params.artifact),
+		approvals: optionalTextList(params.approval),
+		blockers: optionalTextList(params.blocker),
+		notes: optionalTextList(params.note),
 		createdAt: timestamp,
 		updatedAt: timestamp,
 	};
@@ -377,6 +403,49 @@ function formatActionResult(details: BoardToolDetails): string {
 	return formatBoard(details.board, details.storagePath);
 }
 
+async function releaseLock(lockPath: string): Promise<void> {
+	await rm(lockPath, { recursive: true, force: true });
+}
+
+async function acquireBoardLock(storagePath: string, signal: AbortSignal | undefined): Promise<() => Promise<void>> {
+	const lockPath = `${storagePath}.lock`;
+	await mkdir(dirname(storagePath), { recursive: true, mode: 0o700 });
+
+	while (true) {
+		throwIfAborted(signal);
+		try {
+			await mkdir(lockPath, { mode: 0o700 });
+			return () => releaseLock(lockPath);
+		} catch (error) {
+			if (!isErrno(error, "EEXIST")) throw error;
+			try {
+				const lockStat = await stat(lockPath);
+				if (Date.now() - lockStat.mtimeMs > BOARD_LOCK_STALE_MS) {
+					await releaseLock(lockPath);
+					continue;
+				}
+			} catch (statError) {
+				if (!isErrno(statError, "ENOENT")) throw statError;
+			}
+			await delay(BOARD_LOCK_RETRY_MS, undefined, { signal });
+		}
+	}
+}
+
+async function withBoardFileLock<T>(
+	storagePath: string,
+	signal: AbortSignal | undefined,
+	fn: () => Promise<T>,
+): Promise<T> {
+	const release = await acquireBoardLock(storagePath, signal);
+	try {
+		throwIfAborted(signal);
+		return await fn();
+	} finally {
+		await release();
+	}
+}
+
 function setBoardStatus(ctx: ExtensionContext, board: BoardState): void {
 	if (!ctx.hasUI) return;
 	const running = board.cards.filter((card) => card.status === "running").length;
@@ -387,63 +456,71 @@ function setBoardStatus(ctx: ExtensionContext, board: BoardState): void {
 	ctx.ui.setStatus(BOARD_STORAGE_KEY, ctx.ui.theme.fg(severity, summary));
 }
 
-async function runBoardAction(ctx: ExtensionContext, params: BoardToolParams): Promise<BoardToolDetails> {
+async function runBoardAction(
+	ctx: ExtensionContext,
+	params: BoardToolParams,
+	signal?: AbortSignal,
+): Promise<BoardToolDetails> {
 	const storagePath = boardPath(ctx);
-	return withFileMutationQueue(storagePath, async () => {
-		const board = await loadBoard(ctx);
-		let card: DevelopmentCard | undefined;
-		let changed = false;
+	return withBoardFileLock(storagePath, signal, () =>
+		withFileMutationQueue(storagePath, async () => {
+			throwIfAborted(signal);
+			const board = await loadBoard(ctx);
+			let card: DevelopmentCard | undefined;
+			let changed = false;
 
-		switch (params.action) {
-			case "summary":
-			case "list":
-				break;
-			case "create":
-				card = createCard(board, ctx, params);
-				changed = true;
-				break;
-			case "show":
-				card = findCard(board, params.id);
-				break;
-			case "move":
-				card = moveCard(board, params);
-				changed = true;
-				break;
-			case "review":
-				card = reviewCard(board, params);
-				changed = true;
-				break;
-			case "block":
-				card = blockCard(board, params);
-				changed = true;
-				break;
-			case "add_note":
-				card = addNote(board, params);
-				changed = true;
-				break;
-			case "link":
-				card = linkCard(board, params);
-				changed = true;
-				break;
-		}
+			switch (params.action) {
+				case "summary":
+				case "list":
+					break;
+				case "create":
+					card = createCard(board, ctx, params);
+					changed = true;
+					break;
+				case "show":
+					card = findCard(board, params.id);
+					break;
+				case "move":
+					card = moveCard(board, params);
+					changed = true;
+					break;
+				case "review":
+					card = reviewCard(board, params);
+					changed = true;
+					break;
+				case "block":
+					card = blockCard(board, params);
+					changed = true;
+					break;
+				case "add_note":
+					card = addNote(board, params);
+					changed = true;
+					break;
+				case "link":
+					card = linkCard(board, params);
+					changed = true;
+					break;
+			}
 
-		if (changed) {
-			await writeBoard(ctx, board);
-		}
+			if (changed) {
+				throwIfAborted(signal);
+				await writeBoard(ctx, board);
+			}
 
-		setBoardStatus(ctx, board);
-		return {
-			action: params.action,
-			storagePath,
-			card,
-			board,
-		};
-	});
+			setBoardStatus(ctx, board);
+			return {
+				action: params.action,
+				storagePath,
+				card,
+				board,
+			};
+		}),
+	);
 }
 
 async function sendBoardAction(pi: ExtensionAPI, ctx: ExtensionContext, params: BoardToolParams): Promise<void> {
 	try {
-		const details = await runBoardAction(ctx, params);
+		const details = await runBoardAction(ctx, params, ctx.signal);
 		pi.sendMessage({
 			customType: "hermes-board",
 			content: formatActionResult(details),
@@ -557,9 +634,9 @@ export default function hermesBoardExtension(pi: ExtensionAPI) {
 			"Cards with remote-mutation or phi-sensitive safety levels require explicit user approval before execution.",
 		],
 		parameters: BOARD_TOOL_PARAMS,
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			try {
-				const details = await runBoardAction(ctx, params);
+				const details = await runBoardAction(ctx, params, signal);
 				return {
 					content: [{ type: "text", text: formatActionResult(details) }],
 					details,

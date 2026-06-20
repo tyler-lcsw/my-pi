@@ -6,18 +6,37 @@ type JsonRecord = Record<string, unknown>;
 interface HermesStatusSnapshot {
 	baseUrl: string;
 	checkedAt: string;
+	authConfigured: boolean;
 	reachable: boolean;
 	health?: JsonRecord;
+	detailedHealth?: JsonRecord;
 	capabilities?: JsonRecord;
 	models: string[];
-	skills: string[];
-	toolsets: string[];
-	errors: string[];
+	errors: EndpointErrorDetails[];
+}
+
+interface EndpointErrorDetails {
+	path: string;
+	status?: number;
+	message: string;
 }
 
 const STATUS_PARAMS = Type.Object({});
 const DEFAULT_HERMES_BASE_URL = "http://127.0.0.1:8642";
+const DEFAULT_ENDPOINT_TIMEOUT_MS = 1_500;
 const HERMES_STATUS_KEY = "hermes";
+
+class HermesEndpointError extends Error {
+	readonly path: string;
+	readonly status: number | undefined;
+
+	constructor(path: string, status: number | undefined, message: string) {
+		super(message);
+		this.name = "HermesEndpointError";
+		this.path = path;
+		this.status = status;
+	}
+}
 
 function isRecord(value: unknown): value is JsonRecord {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -32,7 +51,7 @@ function getHermesBaseUrl(): string {
 	return normalizeBaseUrl(process.env.HERMES_API_BASE_URL ?? process.env.HERMES_API_URL);
 }
 
-function getRequestHeaders(): HeadersInit {
+function getRequestHeaders(): Record<string, string> {
 	const headers: Record<string, string> = {
 		accept: "application/json",
 	};
@@ -47,15 +66,56 @@ function getRequestHeaders(): HeadersInit {
 	return headers;
 }
 
-async function fetchJson(baseUrl: string, path: string, signal?: AbortSignal): Promise<unknown> {
-	const response = await fetch(`${baseUrl}${path}`, {
-		headers: getRequestHeaders(),
-		signal,
-	});
-	if (!response.ok) {
-		throw new Error(`${path} returned HTTP ${response.status}`);
+function getEndpointTimeoutMs(): number {
+	const raw = process.env.HERMES_API_TIMEOUT_MS?.trim();
+	if (!raw) return DEFAULT_ENDPOINT_TIMEOUT_MS;
+	const value = Number(raw);
+	return Number.isFinite(value) && value > 0 ? Math.floor(value) : DEFAULT_ENDPOINT_TIMEOUT_MS;
+}
+
+function createEndpointSignal(signal: AbortSignal | undefined): { signal: AbortSignal; cleanup(): void } {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => {
+		controller.abort(new Error(`Hermes endpoint timed out after ${getEndpointTimeoutMs()}ms`));
+	}, getEndpointTimeoutMs());
+	const abortFromParent = () => {
+		controller.abort(signal?.reason);
+	};
+	if (signal?.aborted) {
+		abortFromParent();
+	} else {
+		signal?.addEventListener("abort", abortFromParent, { once: true });
 	}
-	return response.json();
+	return {
+		signal: controller.signal,
+		cleanup: () => {
+			clearTimeout(timeout);
+			signal?.removeEventListener("abort", abortFromParent);
+		},
+	};
+}
+
+async function fetchJson(baseUrl: string, path: string, signal?: AbortSignal): Promise<unknown> {
+	const endpointSignal = createEndpointSignal(signal);
+	try {
+		const response = await fetch(`${baseUrl}${path}`, {
+			headers: getRequestHeaders(),
+			signal: endpointSignal.signal,
+		});
+		if (!response.ok) {
+			throw new HermesEndpointError(path, response.status, `${path} returned HTTP ${response.status}`);
+		}
+		return response.json();
+	} catch (error) {
+		if (endpointSignal.signal.aborted && !(error instanceof HermesEndpointError)) {
+			const reason = endpointSignal.signal.reason;
+			const message = reason instanceof Error ? reason.message : `Hermes endpoint timed out after ${getEndpointTimeoutMs()}ms`;
+			throw new HermesEndpointError(path, undefined, message);
+		}
+		throw error;
+	} finally {
+		endpointSignal.cleanup();
+	}
 }
 
 function readStringField(record: JsonRecord, key: string): string | undefined {
@@ -79,6 +139,21 @@ function asRecord(payload: unknown): JsonRecord | undefined {
 	return isRecord(payload) ? payload : undefined;
 }
 
+function endpointErrorDetails(path: string, error: unknown): EndpointErrorDetails {
+	if (error instanceof HermesEndpointError) {
+		return {
+			path: error.path,
+			status: error.status,
+			message: error.message,
+		};
+	}
+	const message = error instanceof Error ? error.message : String(error);
+	return {
+		path,
+		message,
+	};
+}
+
 async function captureEndpoint<T>(
 	snapshot: HermesStatusSnapshot,
 	path: string,
@@ -89,8 +164,7 @@ async function captureEndpoint<T>(
 		const payload = await fetchJson(snapshot.baseUrl, path, signal);
 		return reader(payload);
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		snapshot.errors.push(message);
+		snapshot.errors.push(endpointErrorDetails(path, error));
 		return undefined;
 	}
 }
@@ -99,19 +173,23 @@ async function readHermesStatus(signal?: AbortSignal): Promise<HermesStatusSnaps
 	const snapshot: HermesStatusSnapshot = {
 		baseUrl: getHermesBaseUrl(),
 		checkedAt: new Date().toISOString(),
+		authConfigured: Boolean(process.env.HERMES_API_KEY?.trim()),
 		reachable: false,
 		models: [],
-		skills: [],
-		toolsets: [],
 		errors: [],
 	};
 
-	snapshot.health = await captureEndpoint(snapshot, "/health", asRecord, signal);
+	const [health, detailedHealth, capabilities, models] = await Promise.all([
+		captureEndpoint(snapshot, "/health", asRecord, signal),
+		captureEndpoint(snapshot, "/health/detailed", asRecord, signal),
+		captureEndpoint(snapshot, "/v1/capabilities", asRecord, signal),
+		captureEndpoint(snapshot, "/v1/models", extractNamedItems, signal),
+	]);
+	snapshot.health = health;
 	snapshot.reachable = snapshot.health !== undefined;
-	snapshot.capabilities = await captureEndpoint(snapshot, "/v1/capabilities", asRecord, signal);
-	snapshot.models = (await captureEndpoint(snapshot, "/v1/models", extractNamedItems, signal)) ?? [];
-	snapshot.skills = (await captureEndpoint(snapshot, "/v1/skills", extractNamedItems, signal)) ?? [];
-	snapshot.toolsets = (await captureEndpoint(snapshot, "/v1/toolsets", extractNamedItems, signal)) ?? [];
+	snapshot.detailedHealth = detailedHealth;
+	snapshot.capabilities = capabilities;
+	snapshot.models = models ?? [];
 
 	return snapshot;
 }
@@ -139,18 +217,19 @@ function formatSnapshot(snapshot: HermesStatusSnapshot): string {
 	const lines = [
 		`Hermes status: ${snapshot.reachable ? "reachable" : "offline"}`,
 		`Base URL: ${snapshot.baseUrl}`,
+		`API key: ${snapshot.authConfigured ? "configured" : "not configured"}`,
 		`Checked: ${snapshot.checkedAt}`,
 		formatJsonSummary("Health", snapshot.health),
+		formatJsonSummary("Detailed health", snapshot.detailedHealth),
 		formatJsonSummary("Capabilities", snapshot.capabilities),
 		formatList("Models", snapshot.models),
-		formatList("Skills", snapshot.skills),
-		formatList("Toolsets", snapshot.toolsets),
 	];
 
 	if (snapshot.errors.length > 0) {
 		lines.push("Errors:");
 		for (const error of snapshot.errors) {
-			lines.push(`- ${error}`);
+			const status = error.status === undefined ? "" : ` HTTP ${error.status}`;
+			lines.push(`- ${error.path}${status}: ${error.message}`);
 		}
 	}
 
@@ -160,12 +239,17 @@ function formatSnapshot(snapshot: HermesStatusSnapshot): string {
 function setHermesStatus(ctx: ExtensionContext, snapshot: HermesStatusSnapshot): void {
 	if (!ctx.hasUI) return;
 	const theme = ctx.ui.theme;
-	const statusText = snapshot.reachable
-		? `Hermes ${plural(snapshot.models.length, "model")}, ${plural(snapshot.skills.length, "skill")}`
-		: "Hermes offline";
+	const needsAuth = snapshot.reachable && !snapshot.authConfigured && snapshot.errors.some((error) => error.status === 401);
+	const statusText = !snapshot.reachable
+		? "Hermes offline"
+		: needsAuth
+			? "Hermes reachable, API key needed"
+			: snapshot.models.length > 0
+				? `Hermes ${plural(snapshot.models.length, "model")}`
+				: "Hermes reachable";
 	ctx.ui.setStatus(
 		HERMES_STATUS_KEY,
-		snapshot.reachable ? theme.fg("success", statusText) : theme.fg("warning", statusText),
+		snapshot.reachable && !needsAuth ? theme.fg("success", statusText) : theme.fg("warning", statusText),
 	);
 }
 
@@ -189,7 +273,7 @@ export default function hermesStatusExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("hermes-status", {
-		description: "Check local Hermes Agent health, models, skills, and toolsets",
+		description: "Check local Hermes Agent health, capabilities, and models",
 		handler: async (_args, ctx) => {
 			await refresh(ctx, true);
 		},
@@ -198,8 +282,8 @@ export default function hermesStatusExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "hermes_status",
 		label: "Hermes Status",
-		description: "Check whether the configured Hermes Agent API server is reachable and summarize models, skills, and toolsets.",
-		promptSnippet: "Check the local Hermes Agent status and summarize its exposed models, skills, and toolsets.",
+		description: "Check whether the configured Hermes Agent API server is reachable and summarize health, capabilities, and models.",
+		promptSnippet: "Check the local Hermes Agent status and summarize its health, capabilities, and exposed models.",
 		promptGuidelines: [
 			"Use hermes_status only for read-only Hermes Agent discovery.",
 			"Do not infer bee01 or production state from this local status check.",
