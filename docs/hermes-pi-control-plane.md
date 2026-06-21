@@ -27,7 +27,8 @@ The recommended control path is a bee01-hosted bridge process:
 ```text
 Local Pi
   -> Tailscale Serve HTTPS URL
-    -> bee01 loopback bridge
+    -> / dashboard proxy to 127.0.0.1:9119
+    -> /bridge proxy to bee01 loopback bridge
       -> Hermes Gateway API on 127.0.0.1:8642
 ```
 
@@ -57,10 +58,10 @@ Local Pi can point `HERMES_API_BASE_URL` at the bridge URL and set `HERMES_API_K
 
 Current local-development access:
 
-- Active exposure is Tailscale Serve HTTPS at `https://bee01.beagle-perch.ts.net/`, proxying to `127.0.0.1:8787`.
-- The bridge itself listens only on bee01 loopback; Tailscale Serve owns the tailnet HTTPS surface.
-- `/v1/*` requires the bridge bearer token and mutations remain disabled unless explicitly enabled.
-- bee01 does not use UFW for this path. The hostname is a Tailscale MagicDNS/Funnel-style tailnet endpoint served by `tailscaled`, and direct bridge access stays on loopback.
+- Active dashboard exposure is Tailscale Serve HTTPS at `https://bee01.beagle-perch.ts.net/`, proxying to the Hermes dashboard on `127.0.0.1:9119`.
+- The Pi-Hermes bridge is exposed at `https://bee01.beagle-perch.ts.net/bridge`, proxying to `127.0.0.1:8787`; Tailscale strips `/bridge` before forwarding.
+- Bridge `/v1/*` routes require the bridge bearer token and mutations remain disabled unless explicitly enabled.
+- bee01 does not use UFW for this path. The hostname is a Tailscale MagicDNS/Funnel-style tailnet endpoint served by `tailscaled`, and direct dashboard/bridge access stays on loopback.
 
 ## bee01 Endpoint Contract
 
