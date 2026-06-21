@@ -140,6 +140,24 @@ test("browser auxiliary paths do not look like bridge failures", async () => {
 	});
 });
 
+test("public browser paths support HEAD checks", async () => {
+	await withServers(async ({ bridgeBaseUrl }) => {
+		const root = await fetch(`${bridgeBaseUrl}/`, { method: "HEAD" });
+		assert.equal(root.status, 200);
+		assert.match(root.headers.get("content-type") ?? "", /text\/html/);
+
+		const health = await fetch(`${bridgeBaseUrl}/health`, { method: "HEAD" });
+		assert.equal(health.status, 200);
+		assert.match(health.headers.get("content-type") ?? "", /application\/json/);
+
+		const browserPath = await fetch(`${bridgeBaseUrl}/missing-browser-route`, { method: "HEAD" });
+		assert.equal(browserPath.status, 200);
+
+		const protectedPath = await fetch(`${bridgeBaseUrl}/v1/models`, { method: "HEAD" });
+		assert.equal(protectedPath.status, 401);
+	});
+});
+
 test("detailed health mirrors Hermes detailed health for Pi status compatibility", async () => {
 	await withServers(async ({ bridgeBaseUrl }) => {
 		const response = await fetch(`${bridgeBaseUrl}/health/detailed`);

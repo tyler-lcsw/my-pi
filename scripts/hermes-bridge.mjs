@@ -147,6 +147,14 @@ function sendHtml(response, status, html, extraHeaders = {}) {
 	response.end(html);
 }
 
+function sendHead(response, status, extraHeaders = {}) {
+	response.writeHead(status, {
+		"cache-control": "no-store",
+		...extraHeaders,
+	});
+	response.end();
+}
+
 function sendNoContent(response) {
 	response.writeHead(204, { "cache-control": "no-store" });
 	response.end();
@@ -355,8 +363,13 @@ function runIdFromPath(pathname, suffix = "") {
 async function handleBridgeRequest(request, response, config) {
 	const url = new URL(request.url ?? "/", "http://127.0.0.1");
 	const pathname = url.pathname;
+	const isPublicRead = request.method === "GET" || request.method === "HEAD";
 
-	if (request.method === "GET" && (pathname === "/" || pathname === "/index.html")) {
+	if (isPublicRead && (pathname === "/" || pathname === "/index.html")) {
+		if (request.method === "HEAD") {
+			sendHead(response, 200, { "content-type": "text/html; charset=utf-8" });
+			return;
+		}
 		if (acceptsHtml(request)) {
 			sendHtml(response, 200, bridgeIndexHtml(config));
 		} else {
@@ -364,19 +377,31 @@ async function handleBridgeRequest(request, response, config) {
 		}
 		return;
 	}
-	if (request.method === "GET" && pathname === "/favicon.ico") {
+	if (isPublicRead && pathname === "/favicon.ico") {
 		sendNoContent(response);
 		return;
 	}
-	if (request.method === "GET" && pathname === "/health") {
+	if (isPublicRead && pathname === "/health") {
+		if (request.method === "HEAD") {
+			sendHead(response, 200, { "content-type": "application/json; charset=utf-8" });
+			return;
+		}
 		sendJson(response, 200, await bridgeStatus(config));
 		return;
 	}
-	if (request.method === "GET" && pathname === "/health/detailed") {
+	if (isPublicRead && pathname === "/health/detailed") {
+		if (request.method === "HEAD") {
+			sendHead(response, 200, { "content-type": "application/json; charset=utf-8" });
+			return;
+		}
 		sendJson(response, 200, await fetchHermesJson(config, "/health/detailed", { auth: false }));
 		return;
 	}
-	if (request.method === "GET" && acceptsHtml(request) && !pathname.startsWith("/v1/")) {
+	if (isPublicRead && !pathname.startsWith("/v1/")) {
+		if (request.method === "HEAD") {
+			sendHead(response, 200, { "content-type": "text/html; charset=utf-8" });
+			return;
+		}
 		sendHtml(response, 200, bridgeIndexHtml(config));
 		return;
 	}
