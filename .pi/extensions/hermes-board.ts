@@ -565,6 +565,13 @@ export default function hermesBoardExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("hermes-kanban", {
+		description: "Show the local Hermes development Kanban board",
+		handler: async (_args, ctx) => {
+			await sendBoardAction(pi, ctx, { action: "summary" });
+		},
+	});
+
 	pi.registerCommand("hermes-card-create", {
 		description: "Create a local Hermes development card",
 		handler: async (args, ctx) => {

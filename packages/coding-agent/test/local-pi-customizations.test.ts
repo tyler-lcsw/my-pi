@@ -318,6 +318,7 @@ describe("local Pi customizations", () => {
 		expect(extensionsResult.extensions.map((extension) => extension.path).sort()).toEqual([
 			join(REPO_ROOT, ".pi", "extensions", "hermes-board.ts"),
 			join(REPO_ROOT, ".pi", "extensions", "hermes-control.ts"),
+			join(REPO_ROOT, ".pi", "extensions", "hermes-help.ts"),
 			join(REPO_ROOT, ".pi", "extensions", "hermes-runs.ts"),
 			join(REPO_ROOT, ".pi", "extensions", "hermes-status.ts"),
 			join(REPO_ROOT, ".pi", "extensions", "prompt-url-widget.ts"),
@@ -362,12 +363,15 @@ describe("local Pi customizations", () => {
 				.map((command) => command.name)
 				.sort(),
 		).toEqual([
+			"hermes",
 			"hermes-board",
 			"hermes-card-create",
 			"hermes-card-move",
 			"hermes-card-review",
 			"hermes-card-run",
 			"hermes-card-show",
+			"hermes-help",
+			"hermes-kanban",
 			"hermes-memory",
 			"hermes-memory-capture",
 			"hermes-model-use",
@@ -398,6 +402,20 @@ describe("local Pi customizations", () => {
 		const statusText = statusResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
 		expect(statusText).toContain("Detailed health: status=ok, api_server=true");
 		expect(statusText).toContain("Models: local-fixture-model");
+
+		const hermesCommand = runner.getCommand("hermes");
+		expect(hermesCommand).toBeDefined();
+		await hermesCommand?.handler("", runner.createCommandContext());
+		expect(
+			sentMessages.some(
+				(message) =>
+					message.customType === "hermes-help" &&
+					typeof message.content === "string" &&
+					message.content.includes("/hermes-kanban") &&
+					message.content.includes("/hermes-run <goal>") &&
+					message.content.includes("/hermes-models"),
+			),
+		).toBe(true);
 
 		const hermesBoard = tools.get("hermes_board");
 		expect(hermesBoard).toBeDefined();
@@ -495,6 +513,18 @@ describe("local Pi customizations", () => {
 			.join("\n");
 		expect(linkedCardText).toContain("Status: running");
 		expect(linkedCardText).toContain("Hermes run: run_fixture_1");
+
+		const kanbanCommand = runner.getCommand("hermes-kanban");
+		expect(kanbanCommand).toBeDefined();
+		await kanbanCommand?.handler("", runner.createCommandContext());
+		expect(
+			sentMessages.some(
+				(message) =>
+					message.customType === "hermes-board" &&
+					typeof message.content === "string" &&
+					message.content.includes("Hermes development board"),
+			),
+		).toBe(true);
 
 		const hermesModels = tools.get("hermes_models");
 		expect(hermesModels).toBeDefined();
