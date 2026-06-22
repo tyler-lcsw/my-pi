@@ -10,6 +10,7 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_BRIDGE_HOST = "127.0.0.1";
 const DEFAULT_BRIDGE_PORT = 8787;
 const DEFAULT_HERMES_BASE_URL = "http://127.0.0.1:8642";
+const DEFAULT_LOCAL_MODELS_BASE_URL = "http://127.0.0.1:8080";
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_BODY_BYTES = 1_048_576;
 
@@ -46,6 +47,11 @@ function normalizeBaseUrl(value) {
 	return raw.endsWith("/") ? raw.slice(0, -1) : raw;
 }
 
+function normalizeLocalModelsBaseUrl(value) {
+	const raw = value?.trim() || DEFAULT_LOCAL_MODELS_BASE_URL;
+	return raw.endsWith("/") ? raw.slice(0, -1) : raw;
+}
+
 function readBridgeToken(env) {
 	const inlineToken = env.PI_HERMES_BRIDGE_TOKEN?.trim();
 	if (inlineToken) return inlineToken;
@@ -68,6 +74,7 @@ export function readBridgeConfig(env = process.env) {
 		bridgeToken: readBridgeToken(env),
 		enableMutations: boolEnv(env.PI_HERMES_BRIDGE_ENABLE_MUTATIONS),
 		hermesBaseUrl: normalizeBaseUrl(env.HERMES_API_BASE_URL ?? env.HERMES_API_URL),
+		localModelsBaseUrl: normalizeLocalModelsBaseUrl(env.HERMES_LOCAL_MODELS_BASE_URL),
 		hermesApiKey: env.HERMES_API_KEY?.trim() || env.API_SERVER_KEY?.trim() || undefined,
 		timeoutMs: parseTimeoutMs(env.PI_HERMES_BRIDGE_TIMEOUT_MS),
 	};
@@ -210,6 +217,48 @@ async function fetchHermesJson(config, path, options = {}) {
 	return payload;
 }
 
+async function fetchLocalModelsJson(config) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => {
+		controller.abort(new Error(`Local model request timed out after ${config.timeoutMs}ms`));
+	}, config.timeoutMs);
+	try {
+		const result = await fetch(`${config.localModelsBaseUrl}/v1/models`, {
+			headers: { accept: "application/json" },
+			signal: controller.signal,
+		});
+		const text = await result.text();
+		let payload;
+		try {
+			payload = text ? JSON.parse(text) : {};
+		} catch {
+			payload = { raw: limitedText(text) };
+		}
+		if (!result.ok) {
+			throw new BridgeError(result.status, `Local model router returned HTTP ${result.status}`, payload);
+		}
+		if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+			return {
+				object: "list",
+				source: "local-model-router",
+				...payload,
+			};
+		}
+		return {
+			object: "list",
+			source: "local-model-router",
+			data: Array.isArray(payload) ? payload : [],
+		};
+	} catch (error) {
+		if (controller.signal.aborted) {
+			throw new BridgeError(504, "Local model router request timed out");
+		}
+		throw error;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
 async function captureStatusEndpoint(config, path, options = {}) {
 	try {
 		return {
@@ -275,16 +324,29 @@ async function proxyStream(request, response, config, path) {
 }
 
 async function bridgeStatus(config) {
-	const [health, detailedHealth, capabilities, models] = await Promise.all([
+	const [health, detailedHealth, capabilities, models, localModels] = await Promise.all([
 		captureStatusEndpoint(config, "/health", { auth: false }),
 		captureStatusEndpoint(config, "/health/detailed", { auth: false }),
 		captureStatusEndpoint(config, "/v1/capabilities"),
 		captureStatusEndpoint(config, "/v1/models"),
+		(async () => {
+			try {
+				return { path: "/v1/local-models", ok: true, payload: await fetchLocalModelsJson(config) };
+			} catch (error) {
+				return {
+					path: "/v1/local-models",
+					ok: false,
+					error: error instanceof BridgeError ? error.message : error instanceof Error ? error.message : String(error),
+					status: error instanceof BridgeError ? error.status : undefined,
+				};
+			}
+		})(),
 	]);
 	return {
 		bridge: {
 			status: "ok",
 			hermesBaseUrl: config.hermesBaseUrl,
+			localModelsBaseUrl: config.localModelsBaseUrl,
 			mutationsEnabled: config.enableMutations,
 			bridgeTokenConfigured: Boolean(config.bridgeToken),
 		},
@@ -293,6 +355,7 @@ async function bridgeStatus(config) {
 			detailedHealth,
 			capabilities,
 			models,
+			localModels,
 		},
 	};
 }
@@ -312,6 +375,7 @@ function bridgeIndex(config) {
 			detailedHealth: "/health/detailed",
 			status: "/v1/status",
 			models: "/v1/models",
+			localModels: "/v1/local-models",
 			capabilities: "/v1/capabilities",
 			runs: "/v1/runs",
 		},
@@ -345,6 +409,7 @@ function bridgeIndexHtml(config) {
 			<li><a href="${index.endpoints.health}">Health</a></li>
 			<li><a href="${index.endpoints.detailedHealth}">Detailed health</a></li>
 			<li><code>${index.endpoints.models}</code> requires the bridge bearer token</li>
+			<li><code>${index.endpoints.localModels}</code> requires the bridge bearer token</li>
 		</ul>
 	</main>
 </body>
@@ -414,6 +479,10 @@ async function handleBridgeRequest(request, response, config) {
 	}
 	if (request.method === "GET" && pathname === "/v1/models") {
 		await proxyJson(request, response, config, "/v1/models");
+		return;
+	}
+	if (request.method === "GET" && pathname === "/v1/local-models") {
+		sendJson(response, 200, await fetchLocalModelsJson(config));
 		return;
 	}
 	if (request.method === "GET" && pathname === "/v1/capabilities") {

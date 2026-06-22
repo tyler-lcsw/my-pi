@@ -4,12 +4,18 @@ This project treats Pi as a frontend and control surface for Hermes Agent. Pi sh
 
 ## Current Local Slice
 
-The first local slice is `.pi/extensions/hermes-status.ts`.
+The first local slices are `.pi/extensions/hermes-status.ts`, `.pi/extensions/hermes-board.ts`, and `.pi/extensions/hermes-control.ts`.
 
 It provides:
 
 - `/hermes-status`: read-only Hermes health, detailed health, capability, and model report.
 - `hermes_status`: read-only tool for the agent to inspect the configured Hermes API surface.
+- `/hermes-models`: read-only gateway/local model catalog report plus the project-scoped preferred local model.
+- `/hermes-model-use <model-id> [note]`: records a project-scoped preferred local model for long-running coding or research work.
+- `hermes_models`: tool for model catalog inspection and preferred-model selection.
+- `/hermes-memory`: local project memory and Kanban task-state summary.
+- `/hermes-memory-capture <note>`: captures a project-scoped local memory note. Do not include PHI, secrets, raw logs, or patient data.
+- `hermes_memory`: tool for local project memory capture and task-state snapshots.
 - Footer status: shows whether the configured Hermes API is reachable.
 
 Configuration:
@@ -18,7 +24,7 @@ Configuration:
 - `HERMES_API_KEY`: optional bearer token for the Hermes API server.
 - `HERMES_SESSION_KEY`: optional `X-Hermes-Session-Key` value to keep memory scoped to this Pi user/workspace.
 
-The extension does not start Hermes, write memory, mutate skills, start runs, or contact bee01.
+The current extensions do not start Hermes, write Hermes long-term memory, mutate skills, or start runs. They can inspect model catalogs and store project-scoped Pi state locally. Hermes memory writes and run submission remain explicit future unlocks.
 
 ## bee01 Bridge
 
@@ -49,6 +55,7 @@ Bridge endpoints:
 - `GET`/`HEAD /health/detailed`: public pass-through for Pi status compatibility.
 - `GET /v1/status`: authenticated bridge/Hermes status summary.
 - `GET /v1/models`: authenticated gateway model catalog.
+- `GET /v1/local-models`: authenticated local model catalog. The bridge queries the local model router/LocalAI surface without forwarding the Hermes Gateway API key.
 - `GET /v1/capabilities`: authenticated gateway capability contract.
 - `GET /v1/runs/{run_id}`: authenticated run status.
 - `GET /v1/runs/{run_id}/events`: authenticated run event stream.
@@ -81,7 +88,7 @@ Current gateway discovery surfaces:
 - `GET /v1/models`
 - `GET /v1/capabilities`
 
-`/health` and `/health/detailed` are public health checks. `/v1/models` and `/v1/capabilities` require bearer auth. On the current bee01 image, `/v1/models` returns the gateway-level model `hermes-agent`; the local model router's internal catalog is separate and includes `hermes-local-auto`, Qwen Hermes aliases, the vision model, Toutetsu, and local TTS.
+`/health` and `/health/detailed` are public health checks. `/v1/models` and `/v1/capabilities` require bearer auth. On the current bee01 image, `/v1/models` returns the gateway-level model `hermes-agent`; the local model router's internal catalog is separate and includes `hermes-local-auto`, Qwen Hermes aliases, the vision model, Toutetsu, and local TTS. The Pi-Hermes bridge exposes this local catalog through `/v1/local-models` for coordination only.
 
 Current gateway control surfaces:
 
@@ -147,6 +154,7 @@ For LMHG work, Hermes should help create and review safeguards, runbooks, migrat
 
 2. Local model provider bridge
    - Let Pi use Hermes-routed local models as selectable Pi models.
+   - Current implementation exposes gateway and local model catalogs and stores a per-project preferred local model before chat-completion routing is enabled.
    - Keep LocalAI/Ollama/Hermes catalog drift visible instead of hiding it.
 
 3. Overnight programming runs
@@ -160,7 +168,8 @@ For LMHG work, Hermes should help create and review safeguards, runbooks, migrat
    - Promote stable project procedures into Pi skills or a Codex plugin.
 
 5. Memory inspection
-   - Search long-term memory by project and session key.
+   - Current implementation captures local Pi project memory notes and Kanban task-state snapshots under Pi extension state.
+   - Next step is search/browse against Hermes long-term memory by project and session key when a stable API is available.
    - Show provenance, source session, and retention class.
    - Flag likely secrets or PHI before anything is saved.
 

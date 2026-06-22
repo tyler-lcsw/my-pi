@@ -31,6 +31,7 @@ function sendJson(response, status, payload) {
 
 async function withServers(callback, envOverrides = {}) {
 	const hermesRequests = [];
+	const localModelRequests = [];
 	const hermes = createServer((request, response) => {
 		hermesRequests.push({
 			method: request.method,
@@ -66,13 +67,30 @@ async function withServers(callback, envOverrides = {}) {
 		}
 		sendJson(response, 404, { error: "missing" });
 	});
+	const localModels = createServer((request, response) => {
+		localModelRequests.push({
+			method: request.method,
+			url: request.url,
+			authorization: request.headers.authorization,
+		});
+		if (request.url === "/v1/models") {
+			sendJson(response, 200, {
+				object: "list",
+				data: [{ id: "qwen3-coder-next-q5-k-m-hermes" }, { id: "hermes-local-auto" }],
+			});
+			return;
+		}
+		sendJson(response, 404, { error: "missing" });
+	});
 
 	const hermesBaseUrl = await listen(hermes);
+	const localModelsBaseUrl = await listen(localModels);
 	const bridge = createBridgeServer({
 		env: {
 			PI_HERMES_BRIDGE_HOST: "127.0.0.1",
 			PI_HERMES_BRIDGE_TOKEN: "bridge-secret",
 			HERMES_API_BASE_URL: hermesBaseUrl,
+			HERMES_LOCAL_MODELS_BASE_URL: localModelsBaseUrl,
 			HERMES_API_KEY: "hermes-secret",
 			...envOverrides,
 		},
@@ -80,9 +98,10 @@ async function withServers(callback, envOverrides = {}) {
 	const bridgeBaseUrl = await listen(bridge);
 
 	try {
-		await callback({ bridgeBaseUrl, hermesRequests });
+		await callback({ bridgeBaseUrl, hermesRequests, localModelRequests });
 	} finally {
 		await close(bridge);
+		await close(localModels);
 		await close(hermes);
 	}
 }
@@ -184,6 +203,26 @@ test("protected gateway reads require the bridge token and use the Hermes key se
 
 		const modelProbe = hermesRequests.find((request) => request.url === "/v1/models");
 		assert.equal(modelProbe?.authorization, "Bearer hermes-secret");
+	});
+});
+
+test("protected local model reads use the local model router without the Hermes key", async () => {
+	await withServers(async ({ bridgeBaseUrl, localModelRequests }) => {
+		const rejected = await fetch(`${bridgeBaseUrl}/v1/local-models`);
+		assert.equal(rejected.status, 401);
+
+		const accepted = await fetch(`${bridgeBaseUrl}/v1/local-models`, {
+			headers: { authorization: "Bearer bridge-secret" },
+		});
+		assert.equal(accepted.status, 200);
+		assert.deepEqual(await accepted.json(), {
+			object: "list",
+			source: "local-model-router",
+			data: [{ id: "qwen3-coder-next-q5-k-m-hermes" }, { id: "hermes-local-auto" }],
+		});
+
+		const modelProbe = localModelRequests.find((request) => request.url === "/v1/models");
+		assert.equal(modelProbe?.authorization, undefined);
 	});
 });
 

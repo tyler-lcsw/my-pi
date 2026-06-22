@@ -86,6 +86,16 @@ function handleHermesFixtureRequest(request: IncomingMessage, response: ServerRe
 		case "/v1/models":
 			writeJson(response, { data: [{ id: "local-fixture-model" }] });
 			return;
+		case "/v1/local-models":
+			writeJson(response, {
+				object: "list",
+				source: "local-model-router",
+				data: [
+					{ id: "qwen3-coder-next-q5-k-m-hermes", owner: "localai" },
+					{ id: "hermes-local-auto", owner: "hermes-router" },
+				],
+			});
+			return;
 		default:
 			response.writeHead(404, { "content-type": "application/json" });
 			response.end('{"error":"not found"}\n');
@@ -200,6 +210,7 @@ describe("local Pi customizations", () => {
 		expect(extensionsResult.errors).toEqual([]);
 		expect(extensionsResult.extensions.map((extension) => extension.path).sort()).toEqual([
 			join(REPO_ROOT, ".pi", "extensions", "hermes-board.ts"),
+			join(REPO_ROOT, ".pi", "extensions", "hermes-control.ts"),
 			join(REPO_ROOT, ".pi", "extensions", "hermes-status.ts"),
 			join(REPO_ROOT, ".pi", "extensions", "prompt-url-widget.ts"),
 			join(REPO_ROOT, ".pi", "extensions", "redraws.ts"),
@@ -248,6 +259,10 @@ describe("local Pi customizations", () => {
 			"hermes-card-move",
 			"hermes-card-review",
 			"hermes-card-show",
+			"hermes-memory",
+			"hermes-memory-capture",
+			"hermes-model-use",
+			"hermes-models",
 			"hermes-status",
 			"tui",
 		]);
@@ -256,9 +271,10 @@ describe("local Pi customizations", () => {
 				.getAllRegisteredTools()
 				.map((tool) => tool.definition.name)
 				.sort(),
-		).toEqual(["hermes_board", "hermes_status"]);
+		).toEqual(["hermes_board", "hermes_memory", "hermes_models", "hermes_status"]);
 		expect(statuses.get("hermes")).toContain("Hermes 1 model");
 		expect(statuses.get("hermes-board")).toContain("Board 0 cards");
+		expect(statuses.get("hermes-models")).toContain("Local models");
 
 		const tools = new Map(runner.getAllRegisteredTools().map((tool) => [tool.definition.name, tool.definition]));
 		const context = runner.createContext();
@@ -291,6 +307,39 @@ describe("local Pi customizations", () => {
 		const listText = listResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
 		expect(listText).toContain("READY (1)");
 		expect(listText).toContain("Tool-created development task");
+
+		const hermesModels = tools.get("hermes_models");
+		expect(hermesModels).toBeDefined();
+		const modelsResult = await hermesModels?.execute(
+			"models-call",
+			{ action: "select", model: "qwen3-coder-next-q5-k-m-hermes", note: "Use for code-heavy local work" },
+			undefined,
+			undefined,
+			context,
+		);
+		const modelsText = modelsResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		expect(modelsText).toContain("Gateway models: local-fixture-model");
+		expect(modelsText).toContain("Local models: hermes-local-auto, qwen3-coder-next-q5-k-m-hermes");
+		expect(modelsText).toContain("Preferred local model: qwen3-coder-next-q5-k-m-hermes");
+
+		const hermesMemory = tools.get("hermes_memory");
+		expect(hermesMemory).toBeDefined();
+		const memoryResult = await hermesMemory?.execute(
+			"memory-call",
+			{
+				action: "capture",
+				title: "Local model coordination",
+				content: "Use qwen3-coder-next for coding tasks and keep board state linked to project memory.",
+				tags: ["models", "task-state"],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const memoryText = memoryResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		expect(memoryText).toContain("Local project memory");
+		expect(memoryText).toContain("Local model coordination");
+		expect(memoryText).toContain("Task state: 1 card");
 
 		const createCommand = runner.getCommand("hermes-card-create");
 		expect(createCommand).toBeDefined();
