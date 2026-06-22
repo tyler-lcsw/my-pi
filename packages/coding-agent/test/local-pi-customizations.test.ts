@@ -28,10 +28,26 @@ const TEST_THEME = {
 
 interface HermesFixture {
 	baseUrl: string;
+	runRequests: HermesRunRequest[];
+	approvalRequests: HermesApprovalRequest[];
 	close(): Promise<void>;
 }
 
 type SentMessage = Parameters<ExtensionActions["sendMessage"]>[0];
+type JsonRecord = Record<string, unknown>;
+
+interface HermesRunRequest {
+	input?: string;
+	session_id?: string;
+	instructions?: string;
+	conversation_history?: unknown;
+	previous_response_id?: string;
+}
+
+interface HermesApprovalRequest {
+	choice?: string;
+	message?: string;
+}
 
 let sentMessages: SentMessage[];
 
@@ -72,7 +88,25 @@ function writeJson(response: ServerResponse, payload: unknown): void {
 	response.end(`${JSON.stringify(payload)}\n`);
 }
 
-function handleHermesFixtureRequest(request: IncomingMessage, response: ServerResponse): void {
+function isRecord(value: unknown): value is JsonRecord {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function readRequestJson(request: IncomingMessage): Promise<unknown> {
+	const chunks: Buffer[] = [];
+	for await (const chunk of request) {
+		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+	}
+	const body = Buffer.concat(chunks).toString("utf-8").trim();
+	return body ? (JSON.parse(body) as unknown) : {};
+}
+
+async function handleHermesFixtureRequest(
+	runRequests: HermesRunRequest[],
+	approvalRequests: HermesApprovalRequest[],
+	request: IncomingMessage,
+	response: ServerResponse,
+): Promise<void> {
 	switch (request.url) {
 		case "/health":
 			writeJson(response, { status: "ok" });
@@ -81,7 +115,15 @@ function handleHermesFixtureRequest(request: IncomingMessage, response: ServerRe
 			writeJson(response, { status: "ok", api_server: true });
 			return;
 		case "/v1/capabilities":
-			writeJson(response, { runs: true, sessions: true, responses: true });
+			writeJson(response, {
+				runs: true,
+				sessions: true,
+				responses: true,
+				run_submission: true,
+				run_status: true,
+				run_stop: true,
+				run_approval_response: true,
+			});
 			return;
 		case "/v1/models":
 			writeJson(response, { data: [{ id: "local-fixture-model" }] });
@@ -96,6 +138,61 @@ function handleHermesFixtureRequest(request: IncomingMessage, response: ServerRe
 				],
 			});
 			return;
+		case "/v1/runs":
+			if (request.method !== "POST") break;
+			{
+				const payload = await readRequestJson(request);
+				if (!isRecord(payload) || typeof payload.input !== "string" || payload.input.trim().length === 0) {
+					response.writeHead(400, { "content-type": "application/json" });
+					response.end('{"error":"input is required"}\n');
+					return;
+				}
+				const runRequest: HermesRunRequest = {
+					input: payload.input,
+					session_id: typeof payload.session_id === "string" ? payload.session_id : undefined,
+					instructions: typeof payload.instructions === "string" ? payload.instructions : undefined,
+					conversation_history: payload.conversation_history,
+					previous_response_id:
+						typeof payload.previous_response_id === "string" ? payload.previous_response_id : undefined,
+				};
+				runRequests.push(runRequest);
+				writeJson(response, {
+					run_id: "run_fixture_1",
+					status: "started",
+					session_id: runRequest.session_id ?? "session_fixture_1",
+				});
+			}
+			return;
+		case "/v1/runs/run_fixture_1":
+			if (request.method !== "GET") break;
+			writeJson(response, {
+				object: "hermes.run",
+				run_id: "run_fixture_1",
+				status: "running",
+				session_id: "session_fixture_1",
+				model: "local-fixture-model",
+				output: "",
+				usage: { input_tokens: 12, output_tokens: 0 },
+			});
+			return;
+		case "/v1/runs/run_fixture_1/stop":
+			if (request.method !== "POST") break;
+			writeJson(response, { status: "stopping" });
+			return;
+		case "/v1/runs/run_fixture_1/approval":
+			if (request.method !== "POST") break;
+			{
+				const payload = await readRequestJson(request);
+				const approvalRequest: HermesApprovalRequest = isRecord(payload)
+					? {
+							choice: typeof payload.choice === "string" ? payload.choice : undefined,
+							message: typeof payload.message === "string" ? payload.message : undefined,
+						}
+					: {};
+				approvalRequests.push(approvalRequest);
+				writeJson(response, { status: "approved", choice: approvalRequest.choice });
+			}
+			return;
 		default:
 			response.writeHead(404, { "content-type": "application/json" });
 			response.end('{"error":"not found"}\n');
@@ -103,7 +200,15 @@ function handleHermesFixtureRequest(request: IncomingMessage, response: ServerRe
 }
 
 async function startHermesFixture(): Promise<HermesFixture> {
-	const server = createServer(handleHermesFixtureRequest);
+	const runRequests: HermesRunRequest[] = [];
+	const approvalRequests: HermesApprovalRequest[] = [];
+	const server = createServer((request, response) => {
+		handleHermesFixtureRequest(runRequests, approvalRequests, request, response).catch((error: unknown) => {
+			response.writeHead(500, { "content-type": "application/json" });
+			const message = error instanceof Error ? error.message : String(error);
+			response.end(`${JSON.stringify({ error: message })}\n`);
+		});
+	});
 	await new Promise<void>((resolveListen) => {
 		server.listen(0, "127.0.0.1", resolveListen);
 	});
@@ -113,6 +218,8 @@ async function startHermesFixture(): Promise<HermesFixture> {
 	}
 	return {
 		baseUrl: `http://127.0.0.1:${address.port}`,
+		runRequests,
+		approvalRequests,
 		close: () =>
 			new Promise<void>((resolveClose, rejectClose) => {
 				server.close((error) => {
@@ -211,6 +318,7 @@ describe("local Pi customizations", () => {
 		expect(extensionsResult.extensions.map((extension) => extension.path).sort()).toEqual([
 			join(REPO_ROOT, ".pi", "extensions", "hermes-board.ts"),
 			join(REPO_ROOT, ".pi", "extensions", "hermes-control.ts"),
+			join(REPO_ROOT, ".pi", "extensions", "hermes-runs.ts"),
 			join(REPO_ROOT, ".pi", "extensions", "hermes-status.ts"),
 			join(REPO_ROOT, ".pi", "extensions", "prompt-url-widget.ts"),
 			join(REPO_ROOT, ".pi", "extensions", "redraws.ts"),
@@ -258,11 +366,17 @@ describe("local Pi customizations", () => {
 			"hermes-card-create",
 			"hermes-card-move",
 			"hermes-card-review",
+			"hermes-card-run",
 			"hermes-card-show",
 			"hermes-memory",
 			"hermes-memory-capture",
 			"hermes-model-use",
 			"hermes-models",
+			"hermes-run",
+			"hermes-run-approve",
+			"hermes-run-show",
+			"hermes-run-stop",
+			"hermes-runs",
 			"hermes-status",
 			"tui",
 		]);
@@ -271,7 +385,7 @@ describe("local Pi customizations", () => {
 				.getAllRegisteredTools()
 				.map((tool) => tool.definition.name)
 				.sort(),
-		).toEqual(["hermes_board", "hermes_memory", "hermes_models", "hermes_status"]);
+		).toEqual(["hermes_board", "hermes_memory", "hermes_models", "hermes_runs", "hermes_status"]);
 		expect(statuses.get("hermes")).toContain("Hermes 1 model");
 		expect(statuses.get("hermes-board")).toContain("Board 0 cards");
 		expect(statuses.get("hermes-models")).toContain("Local models");
@@ -307,6 +421,80 @@ describe("local Pi customizations", () => {
 		const listText = listResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
 		expect(listText).toContain("READY (1)");
 		expect(listText).toContain("Tool-created development task");
+
+		const hermesRuns = tools.get("hermes_runs");
+		expect(hermesRuns).toBeDefined();
+		const startResult = await hermesRuns?.execute(
+			"runs-start-call",
+			{ action: "start", input: "Run the local smoke task", instructions: "Use local-only test data." },
+			undefined,
+			undefined,
+			context,
+		);
+		const startText = startResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		expect(startText).toContain("run_fixture_1");
+		expect(startText).toContain("Status: started");
+		expect(hermesFixture.runRequests[0]?.input).toBe("Run the local smoke task");
+		expect(hermesFixture.runRequests[0]?.instructions).toBe("Use local-only test data.");
+
+		const showResult = await hermesRuns?.execute(
+			"runs-show-call",
+			{ action: "show", runId: "run_fixture_1" },
+			undefined,
+			undefined,
+			context,
+		);
+		const showText = showResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		expect(showText).toContain("Status: running");
+		expect(showText).toContain("Model: local-fixture-model");
+
+		const approveResult = await hermesRuns?.execute(
+			"runs-approve-call",
+			{ action: "approve", runId: "run_fixture_1", choice: "once", message: "Approve fixture step." },
+			undefined,
+			undefined,
+			context,
+		);
+		const approveText = approveResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		expect(approveText).toContain("Approval: approved");
+		expect(hermesFixture.approvalRequests[0]).toEqual({ choice: "once", message: "Approve fixture step." });
+
+		const stopResult = await hermesRuns?.execute(
+			"runs-stop-call",
+			{ action: "stop", runId: "run_fixture_1" },
+			undefined,
+			undefined,
+			context,
+		);
+		const stopText = stopResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		expect(stopText).toContain("Stop: stopping");
+
+		const cardRunResult = await hermesRuns?.execute(
+			"runs-card-call",
+			{ action: "run_card", cardId: "HB-0001" },
+			undefined,
+			undefined,
+			context,
+		);
+		const cardRunText = cardRunResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
+		expect(cardRunText).toContain("HB-0001");
+		expect(cardRunText).toContain("Hermes run: run_fixture_1");
+		expect(cardRunText).toContain("Status: running");
+		expect(hermesFixture.runRequests[1]?.input).toContain("Tool-created development task");
+		expect(hermesFixture.runRequests[1]?.instructions).toContain("Verification: npm run check");
+
+		const linkedCardResult = await hermesBoard?.execute(
+			"board-show-linked-call",
+			{ action: "show", id: "HB-0001" },
+			undefined,
+			undefined,
+			context,
+		);
+		const linkedCardText = linkedCardResult?.content
+			.map((item) => (item.type === "text" ? item.text : ""))
+			.join("\n");
+		expect(linkedCardText).toContain("Status: running");
+		expect(linkedCardText).toContain("Hermes run: run_fixture_1");
 
 		const hermesModels = tools.get("hermes_models");
 		expect(hermesModels).toBeDefined();

@@ -4,7 +4,7 @@ This project treats Pi as a frontend and control surface for Hermes Agent. Pi sh
 
 ## Current Local Slice
 
-The first local slices are `.pi/extensions/hermes-status.ts`, `.pi/extensions/hermes-board.ts`, and `.pi/extensions/hermes-control.ts`.
+The first local slices are `.pi/extensions/hermes-status.ts`, `.pi/extensions/hermes-board.ts`, `.pi/extensions/hermes-control.ts`, and `.pi/extensions/hermes-runs.ts`.
 
 It provides:
 
@@ -16,6 +16,13 @@ It provides:
 - `/hermes-memory`: local project memory and Kanban task-state summary.
 - `/hermes-memory-capture <note>`: captures a project-scoped local memory note. Do not include PHI, secrets, raw logs, or patient data.
 - `hermes_memory`: tool for local project memory capture and task-state snapshots.
+- `/hermes-run <goal>`: submits a bounded Hermes run through the configured API or bridge.
+- `/hermes-runs`: shows the local Pi run registry.
+- `/hermes-run-show <run-id>`: fetches current Hermes run status.
+- `/hermes-run-stop <run-id>`: requests a Hermes run stop.
+- `/hermes-run-approve <run-id> once|session|always|deny [message]`: responds to a waiting Hermes approval.
+- `/hermes-card-run <card-id>`: starts a Hermes run from a Kanban card, links the returned run ID, and moves the card to `running`.
+- `hermes_runs`: tool for run launch, status lookup, stop, approval, and Kanban handoff.
 - Footer status: shows whether the configured Hermes API is reachable.
 
 Configuration:
@@ -23,8 +30,17 @@ Configuration:
 - `HERMES_API_BASE_URL` or `HERMES_API_URL`: defaults to `http://127.0.0.1:8642`.
 - `HERMES_API_KEY`: optional bearer token for the Hermes API server.
 - `HERMES_SESSION_KEY`: optional `X-Hermes-Session-Key` value to keep memory scoped to this Pi user/workspace.
+- `HERMES_RUN_TIMEOUT_MS`: optional timeout for run submission, status, stop, and approval requests. Defaults to 30000 ms.
 
-The current extensions do not start Hermes, write Hermes long-term memory, mutate skills, or start runs. They can inspect model catalogs and store project-scoped Pi state locally. Hermes memory writes and run submission remain explicit future unlocks.
+The current extensions can start and manage Hermes runs only through explicit commands or `hermes_runs` tool calls. They do not write Hermes long-term memory, mutate skills, or bypass approval gates. Hermes memory writes remain a future unlock.
+
+Kanban handoff behavior:
+
+- A board card remains local Pi state until `/hermes-card-run <card-id>` or `hermes_runs` action `run_card` is invoked.
+- The handoff submits the card goal as the Hermes run input.
+- The handoff includes card metadata in run instructions: card ID, project, repo path, safety level, expected duration, and verification command.
+- After Hermes returns a run ID, Pi stores the run in the local run registry, writes `hermesRunId` to the card, appends a note, and moves the card to `running`.
+- The board card is not itself approval for remote mutation or PHI handling.
 
 ## bee01 Bridge
 
@@ -59,7 +75,7 @@ Bridge endpoints:
 - `GET /v1/capabilities`: authenticated gateway capability contract.
 - `GET /v1/runs/{run_id}`: authenticated run status.
 - `GET /v1/runs/{run_id}/events`: authenticated run event stream.
-- `POST /v1/runs`, `/v1/runs/{run_id}/approval`, `/v1/runs/{run_id}/stop`: disabled by default and reserved for explicit approval-gated workflows.
+- `POST /v1/runs`, `/v1/runs/{run_id}/approval`, `/v1/runs/{run_id}/stop`: disabled by default unless `PI_HERMES_BRIDGE_ENABLE_MUTATIONS=1`; use only for explicit approval-gated workflows.
 
 Local Pi can point `HERMES_API_BASE_URL` at the bridge URL and set `HERMES_API_KEY` to the bridge token. This avoids copying the Hermes Gateway `API_SERVER_KEY` to the Mac.
 
@@ -67,7 +83,7 @@ Current local-development access:
 
 - Active dashboard exposure is Tailscale Serve HTTPS at `https://bee01.beagle-perch.ts.net/`, proxying to the Hermes dashboard on `127.0.0.1:9119`.
 - The Pi-Hermes bridge is exposed at `https://bee01.beagle-perch.ts.net/bridge`, proxying to `127.0.0.1:8787`; Tailscale strips `/bridge` before forwarding.
-- Bridge `/v1/*` routes require the bridge bearer token and mutations remain disabled unless explicitly enabled.
+- Bridge `/v1/*` routes require the bridge bearer token. Run mutations require `PI_HERMES_BRIDGE_ENABLE_MUTATIONS=1`.
 - bee01 does not use UFW for this path. The hostname is a Tailscale MagicDNS/Funnel-style tailnet endpoint served by `tailscaled`, and direct dashboard/bridge access stays on loopback.
 
 ## bee01 Endpoint Contract

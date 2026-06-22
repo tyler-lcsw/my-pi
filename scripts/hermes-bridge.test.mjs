@@ -276,3 +276,24 @@ test("run creation is blocked unless bridge mutations are explicitly enabled", a
 		assert.match(body.error, /disabled/);
 	});
 });
+
+test("run creation proxies to Hermes when bridge mutations are explicitly enabled", async () => {
+	await withServers(
+		async ({ bridgeBaseUrl, hermesRequests }) => {
+			const response = await fetch(`${bridgeBaseUrl}/v1/runs`, {
+				method: "POST",
+				headers: {
+					authorization: "Bearer bridge-secret",
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({ input: "test" }),
+			});
+			assert.equal(response.status, 200);
+			assert.deepEqual(await response.json(), { id: "run-1" });
+
+			const runRequest = hermesRequests.find((request) => request.url === "/v1/runs" && request.method === "POST");
+			assert.equal(runRequest?.authorization, "Bearer hermes-secret");
+		},
+		{ PI_HERMES_BRIDGE_ENABLE_MUTATIONS: "1" },
+	);
+});
