@@ -405,6 +405,9 @@ describe("local Pi customizations", () => {
 
 		const hermesCommand = runner.getCommand("hermes");
 		expect(hermesCommand).toBeDefined();
+		expect(await hermesCommand?.getArgumentCompletions?.("kan")).toContainEqual(
+			expect.objectContaining({ label: "/hermes-kanban" }),
+		);
 		await hermesCommand?.handler("", runner.createCommandContext());
 		expect(
 			sentMessages.some(
@@ -429,6 +432,19 @@ describe("local Pi customizations", () => {
 		const createText = createResult?.content.map((item) => (item.type === "text" ? item.text : "")).join("\n");
 		expect(createText).toContain("Tool-created development task");
 
+		const cardCreateCommand = runner.getCommand("hermes-card-create");
+		expect(await cardCreateCommand?.getArgumentCompletions?.("")).toContainEqual(
+			expect.objectContaining({ label: "<title>" }),
+		);
+		const cardMoveCommand = runner.getCommand("hermes-card-move");
+		expect(await cardMoveCommand?.getArgumentCompletions?.("HB-0001 r")).toContainEqual(
+			expect.objectContaining({ value: "HB-0001 running", label: "running" }),
+		);
+		const cardShowCommand = runner.getCommand("hermes-card-show");
+		expect(await cardShowCommand?.getArgumentCompletions?.("")).toContainEqual(
+			expect.objectContaining({ label: "<card-id>" }),
+		);
+
 		const listResult = await hermesBoard?.execute(
 			"board-list-call",
 			{ action: "list" },
@@ -442,6 +458,10 @@ describe("local Pi customizations", () => {
 
 		const hermesRuns = tools.get("hermes_runs");
 		expect(hermesRuns).toBeDefined();
+		const runCommand = runner.getCommand("hermes-run");
+		expect(await runCommand?.getArgumentCompletions?.("")).toContainEqual(
+			expect.objectContaining({ label: "<goal>" }),
+		);
 		const startResult = await hermesRuns?.execute(
 			"runs-start-call",
 			{ action: "start", input: "Run the local smoke task", instructions: "Use local-only test data." },
@@ -466,6 +486,10 @@ describe("local Pi customizations", () => {
 		expect(showText).toContain("Status: running");
 		expect(showText).toContain("Model: local-fixture-model");
 
+		const approveCommand = runner.getCommand("hermes-run-approve");
+		expect(await approveCommand?.getArgumentCompletions?.("run_fixture_1 o")).toContainEqual(
+			expect.objectContaining({ value: "run_fixture_1 once", label: "once" }),
+		);
 		const approveResult = await hermesRuns?.execute(
 			"runs-approve-call",
 			{ action: "approve", runId: "run_fixture_1", choice: "once", message: "Approve fixture step." },
@@ -528,6 +552,10 @@ describe("local Pi customizations", () => {
 
 		const hermesModels = tools.get("hermes_models");
 		expect(hermesModels).toBeDefined();
+		const modelUseCommand = runner.getCommand("hermes-model-use");
+		expect(await modelUseCommand?.getArgumentCompletions?.("qwen")).toContainEqual(
+			expect.objectContaining({ value: "qwen3-coder-next-q5-k-m", label: "qwen3-coder-next-q5-k-m" }),
+		);
 		const modelsResult = await hermesModels?.execute(
 			"models-call",
 			{ action: "select", model: "qwen3-coder-next-q5-k-m-hermes", note: "Use for code-heavy local work" },
@@ -542,6 +570,10 @@ describe("local Pi customizations", () => {
 
 		const hermesMemory = tools.get("hermes_memory");
 		expect(hermesMemory).toBeDefined();
+		const memoryCaptureCommand = runner.getCommand("hermes-memory-capture");
+		expect(await memoryCaptureCommand?.getArgumentCompletions?.("")).toContainEqual(
+			expect.objectContaining({ label: "<note>" }),
+		);
 		const memoryResult = await hermesMemory?.execute(
 			"memory-call",
 			{

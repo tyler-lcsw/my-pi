@@ -549,6 +549,72 @@ function firstToken(input: string): { token: string | undefined; rest: string } 
 	};
 }
 
+function filterCompletions(
+	items: Array<{ value: string; label: string; description?: string }>,
+	prefix: string,
+): Array<{ value: string; label: string; description?: string }> {
+	const normalizedPrefix = prefix.trim().toLowerCase();
+	if (!normalizedPrefix) return items;
+	return items.filter(
+		(item) =>
+			item.value.toLowerCase().includes(normalizedPrefix) ||
+			item.label.toLowerCase().includes(normalizedPrefix) ||
+			item.description?.toLowerCase().includes(normalizedPrefix),
+	);
+}
+
+function cardIdCompletions(prefix: string): Array<{ value: string; label: string; description?: string }> {
+	return filterCompletions(
+		[
+			{
+				value: "HB-0001",
+				label: "<card-id>",
+				description: "Card ID from /hermes-kanban or /hermes-card-show output",
+			},
+		],
+		prefix,
+	);
+}
+
+function titleCompletions(prefix: string): Array<{ value: string; label: string; description?: string }> {
+	return filterCompletions(
+		[
+			{
+				value: "Implement next development task",
+				label: "<title>",
+				description: "Short title for the new development card",
+			},
+		],
+		prefix,
+	);
+}
+
+function reviewCompletions(prefix: string): Array<{ value: string; label: string; description?: string }> {
+	return filterCompletions(
+		[
+			{
+				value: "HB-0001 Ready for review",
+				label: "<card-id> [note]",
+				description: "Move a card to review with an optional note",
+			},
+		],
+		prefix,
+	);
+}
+
+function cardMoveCompletions(prefix: string): Array<{ value: string; label: string; description?: string }> {
+	const parsed = firstToken(prefix);
+	if (!parsed.token) {
+		return cardIdCompletions(prefix);
+	}
+	const statusPrefix = parsed.rest.trim().toLowerCase();
+	return BOARD_STATUSES.filter((status) => status.startsWith(statusPrefix)).map((status) => ({
+		value: `${parsed.token} ${status}`,
+		label: status,
+		description: `Move ${parsed.token} to ${status}`,
+	}));
+}
+
 export default function hermesBoardExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		try {
@@ -574,6 +640,7 @@ export default function hermesBoardExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("hermes-card-create", {
 		description: "Create a local Hermes development card",
+		getArgumentCompletions: titleCompletions,
 		handler: async (args, ctx) => {
 			const title = args.trim();
 			if (!title) {
@@ -586,13 +653,7 @@ export default function hermesBoardExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("hermes-card-move", {
 		description: "Move a Hermes development card to another board column",
-		getArgumentCompletions: (prefix) => {
-			const normalizedPrefix = prefix.trim();
-			return BOARD_STATUSES.filter((status) => status.startsWith(normalizedPrefix)).map((status) => ({
-				value: status,
-				label: status,
-			}));
-		},
+		getArgumentCompletions: cardMoveCompletions,
 		handler: async (args, ctx) => {
 			const idPart = firstToken(args);
 			const status = idPart.rest.trim();
@@ -606,6 +667,7 @@ export default function hermesBoardExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("hermes-card-show", {
 		description: "Show one local Hermes development card",
+		getArgumentCompletions: cardIdCompletions,
 		handler: async (args, ctx) => {
 			const id = args.trim();
 			if (!id) {
@@ -618,6 +680,7 @@ export default function hermesBoardExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("hermes-card-review", {
 		description: "Move a Hermes development card to review with an optional note",
+		getArgumentCompletions: reviewCompletions,
 		handler: async (args, ctx) => {
 			const idPart = firstToken(args);
 			if (!idPart.token) {

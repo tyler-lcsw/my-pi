@@ -700,6 +700,86 @@ function firstToken(input: string): { token: string | undefined; rest: string } 
 	return { token: trimmed.slice(0, spaceIndex), rest: trimmed.slice(spaceIndex).trim() };
 }
 
+function filterCompletions(
+	items: Array<{ value: string; label: string; description?: string }>,
+	prefix: string,
+): Array<{ value: string; label: string; description?: string }> {
+	const normalizedPrefix = prefix.trim().toLowerCase();
+	if (!normalizedPrefix) return items;
+	return items.filter(
+		(item) =>
+			item.value.toLowerCase().includes(normalizedPrefix) ||
+			item.label.toLowerCase().includes(normalizedPrefix) ||
+			item.description?.toLowerCase().includes(normalizedPrefix),
+	);
+}
+
+function runGoalCompletions(prefix: string): Array<{ value: string; label: string; description?: string }> {
+	return filterCompletions(
+		[
+			{
+				value: "Run a bounded local-only development task and report blockers",
+				label: "<goal>",
+				description: "Goal text for a new Hermes run",
+			},
+		],
+		prefix,
+	);
+}
+
+function runIdCompletions(prefix: string): Array<{ value: string; label: string; description?: string }> {
+	return filterCompletions(
+		[
+			{
+				value: "run_<id>",
+				label: "<run-id>",
+				description: "Run ID from /hermes-runs or /hermes-run output",
+			},
+		],
+		prefix,
+	);
+}
+
+function cardIdCompletions(prefix: string): Array<{ value: string; label: string; description?: string }> {
+	return filterCompletions(
+		[
+			{
+				value: "HB-0001",
+				label: "<card-id>",
+				description: "Card ID from /hermes-kanban",
+			},
+		],
+		prefix,
+	);
+}
+
+function approvalCompletions(prefix: string): Array<{ value: string; label: string; description?: string }> {
+	const runPart = firstToken(prefix);
+	if (!runPart.token) return runIdCompletions(prefix);
+	const choicePart = firstToken(runPart.rest);
+	if (!choicePart.token) {
+		return APPROVAL_CHOICES.map((choice) => ({
+			value: `${runPart.token} ${choice}`,
+			label: choice,
+			description: `Approve mode for ${runPart.token}`,
+		}));
+	}
+	const normalizedChoicePrefix = choicePart.token.toLowerCase();
+	const choices = APPROVAL_CHOICES.filter((choice) => choice.startsWith(normalizedChoicePrefix)).map((choice) => ({
+		value: `${runPart.token} ${choice}`,
+		label: choice,
+		description: `Approve mode for ${runPart.token}`,
+	}));
+	if (choices.length > 0) return choices;
+	return [
+		{
+			value: `${runPart.token} ${choicePart.token} Approved for this step`,
+			label: "[message]",
+			description: "Optional approval or denial message",
+		},
+	];
+}
+
 export default function hermesRunsExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		try {
@@ -711,6 +791,7 @@ export default function hermesRunsExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("hermes-run", {
 		description: "Start a Hermes Agent run from Pi",
+		getArgumentCompletions: runGoalCompletions,
 		handler: async (args, ctx) => {
 			const input = normalizeText(args);
 			if (!input) {
@@ -730,6 +811,7 @@ export default function hermesRunsExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("hermes-run-show", {
 		description: "Fetch one Hermes Agent run status",
+		getArgumentCompletions: runIdCompletions,
 		handler: async (args, ctx) => {
 			const runId = normalizeText(args);
 			if (!runId) {
@@ -742,6 +824,7 @@ export default function hermesRunsExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("hermes-run-stop", {
 		description: "Request stop for a Hermes Agent run",
+		getArgumentCompletions: runIdCompletions,
 		handler: async (args, ctx) => {
 			const runId = normalizeText(args);
 			if (!runId) {
@@ -754,6 +837,7 @@ export default function hermesRunsExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("hermes-run-approve", {
 		description: "Approve or deny a waiting Hermes Agent run step",
+		getArgumentCompletions: approvalCompletions,
 		handler: async (args, ctx) => {
 			const runPart = firstToken(args);
 			const choicePart = firstToken(runPart.rest);
@@ -772,6 +856,7 @@ export default function hermesRunsExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("hermes-card-run", {
 		description: "Start a Hermes Agent run from a local Hermes board card",
+		getArgumentCompletions: cardIdCompletions,
 		handler: async (args, ctx) => {
 			const cardId = normalizeText(args);
 			if (!cardId) {

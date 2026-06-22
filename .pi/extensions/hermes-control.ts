@@ -425,6 +425,56 @@ function firstToken(input: string): { token: string | undefined; rest: string } 
 	return { token: trimmed.slice(0, spaceIndex), rest: trimmed.slice(spaceIndex).trim() };
 }
 
+function filterCompletions(
+	items: Array<{ value: string; label: string; description?: string }>,
+	prefix: string,
+): Array<{ value: string; label: string; description?: string }> {
+	const normalizedPrefix = prefix.trim().toLowerCase();
+	if (!normalizedPrefix) return items;
+	return items.filter(
+		(item) =>
+			item.value.toLowerCase().includes(normalizedPrefix) ||
+			item.label.toLowerCase().includes(normalizedPrefix) ||
+			item.description?.toLowerCase().includes(normalizedPrefix),
+	);
+}
+
+function modelUseCompletions(prefix: string): Array<{ value: string; label: string; description?: string }> {
+	return filterCompletions(
+		[
+			{
+				value: "qwen3-coder-next-q5-k-m",
+				label: "qwen3-coder-next-q5-k-m",
+				description: "Coding-oriented local model",
+			},
+			{
+				value: "hermes-local-auto",
+				label: "hermes-local-auto",
+				description: "Let Hermes choose the local model route",
+			},
+			{
+				value: "nousresearch_hermes-4-14b",
+				label: "nousresearch_hermes-4-14b",
+				description: "Hermes local model alias",
+			},
+		],
+		prefix,
+	);
+}
+
+function memoryCaptureCompletions(prefix: string): Array<{ value: string; label: string; description?: string }> {
+	return filterCompletions(
+		[
+			{
+				value: "Remember this project decision: ",
+				label: "<note>",
+				description: "Project-scoped note; do not include PHI or secrets",
+			},
+		],
+		prefix,
+	);
+}
+
 export default function hermesControlExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		try {
@@ -443,6 +493,7 @@ export default function hermesControlExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("hermes-model-use", {
 		description: "Select a preferred bee01 local model for this project",
+		getArgumentCompletions: modelUseCompletions,
 		handler: async (args, ctx) => {
 			const parsed = firstToken(args);
 			if (!parsed.token) {
@@ -462,6 +513,7 @@ export default function hermesControlExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("hermes-memory-capture", {
 		description: "Capture a local project memory note",
+		getArgumentCompletions: memoryCaptureCompletions,
 		handler: async (args, ctx) => {
 			const content = normalizeText(args);
 			if (!content) {
